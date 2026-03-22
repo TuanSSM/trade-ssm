@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Remember: rust_decimal for prices/volumes, never f64. Anti-repainting: never signal on forming candle.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Verify: just ci passes, no f64 in price paths, anti-repainting rules followed.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
