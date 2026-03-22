@@ -5,6 +5,9 @@ members = [
     "crates/ssm-exchange",
     "crates/ssm-indicators",
     "crates/ssm-notify",
+    "crates/ssm-execution",
+    "crates/ssm-strategy",
+    "crates/ssm-ai",
     "services/analyzer",
     "services/download-data",
     "services/backtest",
@@ -31,3 +34,6 @@ ssm-core = { path = "crates/ssm-core" }
 ssm-exchange = { path = "crates/ssm-exchange" }
 ssm-indicators = { path = "crates/ssm-indicators" }
 ssm-notify = { path = "crates/ssm-notify" }
+ssm-execution = { path = "crates/ssm-execution" }
+ssm-strategy = { path = "crates/ssm-strategy" }
+ssm-ai = { path = "crates/ssm-ai" }

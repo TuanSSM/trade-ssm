@@ -9,10 +9,11 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=${RUST_LOG:-info}
       - SYMBOL=${SYMBOL:-BTCUSDT}
       - INTERVAL=${INTERVAL:-15m}
       - CHECK_INTERVAL_SECS=${CHECK_INTERVAL_SECS:-60}
+      - EXECUTION_MODE=${EXECUTION_MODE:-paper}
 
   # === Download historical data (freqtrade: download-data) ===
   download-data:
@@ -25,7 +26,7 @@ services:
     volumes:
       - ./user_data:/app/user_data
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=${RUST_LOG:-info}
       - SYMBOL=${SYMBOL:-BTCUSDT}
       - INTERVAL=${INTERVAL:-15m}
       - DAYS=${DAYS:-30}
@@ -42,6 +43,6 @@ services:
     volumes:
       - ./user_data:/app/user_data
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=${RUST_LOG:-info}
       - DATAFILE=${DATAFILE:-}
       - CVD_WINDOW=${CVD_WINDOW:-15}

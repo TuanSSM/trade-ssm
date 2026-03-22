@@ -1,0 +1,14 @@
+[package]
+name = "ssm-execution"
+description = "Order management, position tracking, paper/live execution for trade-ssm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

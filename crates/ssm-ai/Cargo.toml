@@ -1,0 +1,14 @@
+[package]
+name = "ssm-ai"
+description = "AI model trait, RL environment, feature pipeline for trade-ssm (XGBoost/RL ready)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+ssm-indicators = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

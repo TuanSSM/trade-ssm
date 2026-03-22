@@ -1,6 +1,6 @@
 .PHONY: build test lint fmt fmt-check check ci run \
        download-data backtest \
-       docker-build docker-up docker-down docker-download docker-backtest \
+       docker-build docker-up docker-down docker-download docker-backtest docker-logs \
        clean
 
 # === Development ===

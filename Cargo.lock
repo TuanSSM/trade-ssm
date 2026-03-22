@@ -1413,6 +1413,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssm-ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "ssm-core",
+ "ssm-indicators",
+ "tracing",
+]
+
+[[package]]
 name = "ssm-core"
 version = "0.1.0"
 dependencies = [
@@ -1437,6 +1450,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssm-execution"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "ssm-core",
+ "tracing",
+]
+
+[[package]]
 name = "ssm-indicators"
 version = "0.1.0"
 dependencies = [
@@ -1453,6 +1479,18 @@ dependencies = [
  "reqwest",
  "rust_decimal",
  "serde_json",
+ "ssm-core",
+ "ssm-indicators",
+ "tracing",
+]
+
+[[package]]
+name = "ssm-strategy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rust_decimal",
+ "serde",
  "ssm-core",
  "ssm-indicators",
  "tracing",

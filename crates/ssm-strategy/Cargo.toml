@@ -1,0 +1,13 @@
+[package]
+name = "ssm-strategy"
+description = "Strategy trait, signal framework, bot + AI strategy interface for trade-ssm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+ssm-indicators = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

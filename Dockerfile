@@ -18,4 +18,7 @@ COPY --from=builder /app/target/release/analyzer /usr/local/bin/analyzer
 COPY --from=builder /app/target/release/download-data /usr/local/bin/download-data
 COPY --from=builder /app/target/release/backtest /usr/local/bin/backtest
 
+RUN mkdir -p /app/user_data
+WORKDIR /app
+
 ENV RUST_LOG=info

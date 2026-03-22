@@ -1,35 +1,42 @@
 # trade-ssm
 
-Rust crypto trading system. CVD + liquidation tracking with Telegram alerts.
-Workspace microservices architecture via Docker Compose.
+Professional Rust crypto trading suite. CVD + liquidation tracking, in-candle trade aggregation,
+bot strategies, RL/ML model interface, paper/live execution, Telegram alerts.
+Inspired by aggr.trade, freqtrade/FreqAI, and RIFEBTC patterns.
 
 ## Architecture
 
 ```
 trade-ssm/
 ├── crates/
-│   ├── ssm-core/          # Shared types: Candle, Liquidation, LiquidationTier
-│   ├── ssm-exchange/      # Exchange connectors (Binance REST) + history download
+│   ├── ssm-core/          # Domain types: Candle, Trade, Order, Position, Signal, AIAction
+│   ├── ssm-exchange/      # Binance REST + WebSocket trade aggregation (aggr-inspired)
 │   ├── ssm-indicators/    # Pure indicators: CVD, liquidation analysis
-│   └── ssm-notify/        # Notification dispatch (Telegram bot)
+│   ├── ssm-notify/        # Telegram notification dispatch
+│   ├── ssm-execution/     # Order engine: paper + live, position tracker
+│   ├── ssm-strategy/      # Strategy trait + built-in CVD momentum strategy
+│   └── ssm-ai/            # AI model trait, RL environment, feature pipeline
 ├── services/
-│   ├── analyzer/          # Live polling service (fetch → analyze → notify)
-│   ├── download-data/     # Historical data fetcher (like freqtrade download-data)
-│   └── backtest/          # Offline indicator replay (like freqtrade backtesting)
-├── .github/workflows/     # CI: check → test → build → backtest pipeline
-├── Dockerfile             # Multi-stage build (all 3 binaries)
-├── docker-compose.yml     # Service orchestration + tool profiles
+│   ├── analyzer/          # Live polling service
+│   ├── download-data/     # Historical data fetcher (freqtrade download-data)
+│   └── backtest/          # Offline indicator replay (freqtrade backtesting)
+├── .github/workflows/     # CI: check → test → build → backtest + secrets
+├── Dockerfile             # Multi-stage build (all binaries)
+├── docker-compose.yml     # Services + tool profiles
 └── Makefile               # Dev workflow shortcuts
 ```
 
 ### Dependency graph
 
 ```
-ssm-core          ← zero external deps (types only)
+ssm-core          ← zero external service deps (shared types)
 ssm-exchange      ← ssm-core, reqwest, tokio
 ssm-indicators    ← ssm-core, rust_decimal
 ssm-notify        ← ssm-core, ssm-indicators, reqwest
-analyzer          ← all crates above
+ssm-execution     ← ssm-core, rust_decimal, chrono
+ssm-strategy      ← ssm-core, ssm-indicators
+ssm-ai            ← ssm-core, ssm-indicators, rust_decimal
+analyzer          ← all crates
 download-data     ← ssm-exchange
 backtest          ← ssm-core, ssm-exchange, ssm-indicators
 ```
@@ -38,13 +45,27 @@ backtest          ← ssm-core, ssm-exchange, ssm-indicators
 
 | Crate | Concern | AI context hint |
 |-------|---------|-----------------|
-| `ssm-core` | Domain types shared across all crates | Read first — <200 lines |
-| `ssm-exchange` | HTTP calls + history download/load | Binance only for MVP |
-| `ssm-indicators` | Pure math on `&[Candle]` slices | No I/O, no async |
-| `ssm-notify` | Telegram message formatting + sending | Depends on indicator types |
-| `analyzer` | Wiring: fetch → analyze → notify loop | Thin main, ~60 lines |
-| `download-data` | Paginated historical kline fetcher | Saves JSON to user_data/ |
-| `backtest` | Sliding-window CVD replay on saved data | Outputs .backtest.json |
+| `ssm-core` | All shared domain types | Read first — enums, structs, traits |
+| `ssm-exchange` | REST + trade aggregation | Binance futures API + aggr-style aggregator |
+| `ssm-indicators` | Pure math on `&[Candle]` | No I/O, no async, deterministic |
+| `ssm-notify` | Telegram formatting + send | Depends on indicator types |
+| `ssm-execution` | Paper/live order engine | Position tracking, all order types |
+| `ssm-strategy` | Strategy trait + builtins | CVD momentum; implement `Strategy` for custom |
+| `ssm-ai` | ML/RL model interface | FreqAI-inspired: features, env, model trait |
+
+## Order types supported
+
+Market, Limit, StopMarket, StopLimit, TakeProfitMarket, TakeProfitLimit, TrailingStop
+
+## AI action space (FreqAI Base5Action)
+
+| Index | Action | Description |
+|-------|--------|-------------|
+| 0 | Neutral | Hold / do nothing |
+| 1 | EnterLong | Open long position |
+| 2 | ExitLong | Close long position |
+| 3 | EnterShort | Open short position |
+| 4 | ExitShort | Close short position |
 
 ## Quick reference
 
@@ -55,17 +76,33 @@ make run               # cargo run --bin analyzer
 make test              # cargo test --workspace
 make lint              # cargo clippy --workspace -- -D warnings
 
-# Data pipeline (freqtrade-inspired)
-make download-data                          # fetch 30d BTCUSDT 15m candles
-make backtest DATAFILE=user_data/file.json  # replay indicators offline
+# Data pipeline
+make download-data                          # fetch 30d candles
+make backtest DATAFILE=user_data/file.json  # replay indicators
 
-# Docker commands (freqtrade-inspired)
+# Docker
 make docker-build          # build all binaries
 make docker-up             # start live analyzer
 make docker-download       # download historical data
 make docker-backtest DATAFILE=/app/user_data/file.json
 make docker-logs           # tail analyzer logs
 ```
+
+## CI/CD (.github/workflows/ci.yml)
+
+```
+check (fmt + clippy) → test → build → backtest → notify
+```
+
+**GitHub Secrets required:**
+- `TELEGRAM_BOT_TOKEN` — for deploy notifications
+- `TELEGRAM_CHAT_ID` — target chat
+
+**Workflow inputs (manual dispatch):**
+- `symbol` (default: BTCUSDT)
+- `interval` (default: 15m)
+- `backtest_days` (default: 7)
+- `cvd_window` (default: 15)
 
 ## Env vars
 
@@ -76,21 +113,11 @@ make docker-logs           # tail analyzer logs
 | `SYMBOL` | all | no | BTCUSDT |
 | `INTERVAL` | all | no | 15m |
 | `CHECK_INTERVAL_SECS` | analyzer | no | 60 |
+| `EXECUTION_MODE` | analyzer | no | paper |
 | `DAYS` | download-data | no | 30 |
 | `DATADIR` | download-data | no | user_data |
 | `DATAFILE` | backtest | yes | — |
 | `CVD_WINDOW` | backtest | no | 15 |
-
-Copy `.env.example` to `.env` and fill in values.
-
-## CI Pipeline (.github/workflows/ci.yml)
-
-```
-check (fmt + clippy) → test → build → backtest (7d live data)
-```
-
-Runs on push to `main`, `develop`, `claude/**` and PRs to `main`.
-Uploads binaries and backtest results as artifacts.
 
 ## Anti-repainting rules
 
@@ -102,6 +129,7 @@ Uploads binaries and backtest results as artifacts.
 ## Conventions
 
 - `rust_decimal::Decimal` for all prices/volumes, never `f64`
+- `f64` only in AI feature vectors (ML libraries expect floats)
 - `anyhow::Result` in binaries, domain errors in libraries
 - All I/O is async (tokio), indicators are sync pure functions
 - One test file per module, inline `#[cfg(test)]` blocks
@@ -111,25 +139,37 @@ Uploads binaries and backtest results as artifacts.
 
 - [ ] `make ci` passes (fmt, clippy, test)
 - [ ] Anti-repainting test for any new indicator
-- [ ] Telegram message formats correctly for new signals
+- [ ] Paper execution tests for new order types
+- [ ] AI model trait implemented for new models
 - [ ] Docker builds successfully
 - [ ] Backtest runs on sample data without errors
 
-## Exchange API reference
+## Adding a new strategy
 
-```bash
-# Binance futures klines (15m, last 16 candles)
-curl "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=16"
+```rust
+impl Strategy for MyStrategy {
+    fn name(&self) -> &str { "my_strategy" }
+    fn analyze(&self, candles: &[Candle]) -> Result<Option<Signal>> {
+        // Your logic here
+    }
+}
+```
 
-# Binance futures klines with time range (historical download)
-curl "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=1000&startTime=MS&endTime=MS"
+## Adding a new AI model
 
-# Binance futures liquidations
-curl "https://fapi.binance.com/fapi/v1/forceOrders?symbol=BTCUSDT&limit=100"
+```rust
+impl AIModel for MyModel {
+    fn name(&self) -> &str { "xgboost_v1" }
+    fn predict(&self, features: &FeatureRow) -> Result<AIAction> { ... }
+    fn train(&mut self, data: &[FeatureRow]) -> Result<TrainMetrics> { ... }
+    fn save(&self, path: &Path) -> Result<()> { ... }
+    fn load(&mut self, path: &Path) -> Result<()> { ... }
+}
 ```
 
 ## Links
 
-- [freqtrade](https://github.com/freqtrade/freqtrade) — strategy arch inspiration
-- [aggr.trade](https://github.com/Tucsky/aggr) — aggregation inspiration
+- [freqtrade](https://github.com/freqtrade/freqtrade) — strategy arch
+- [FreqAI RL](https://www.freqtrade.io/en/stable/freqai-reinforcement-learning/) — RL patterns
+- [aggr.trade](https://github.com/Tucsky/aggr) — trade aggregation
 - [Binance API](https://binance-docs.github.io/apidocs/)
