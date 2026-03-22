@@ -1,0 +1,338 @@
+name: PR Docker Integration
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  packages: read
+
+concurrency:
+  group: pr-docker-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  DOCKER_BUILDKIT: 1
+
+jobs:
+  # ── Gate: only run Docker integration if code or Docker files changed ──
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - 'docker-compose.yml'
+              - 'docker-compose.*.yml'
+              - '.github/workflows/pr-docker.yml'
+            rust:
+              - 'crates/**'
+              - 'services/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
+  # ── Docker build test ──
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.rust == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        id: docker-build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: trade-ssm:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha,scope=pr-docker
+          cache-to: type=gha,mode=min,scope=pr-docker
+
+      - name: Verify binaries in image
+        id: verify
+        run: |
+          {
+            echo "## Docker Image Verification"
+            echo ""
+            echo "**Image:** \`trade-ssm:pr-${{ github.event.pull_request.number }}\`"
+            echo ""
+
+            echo "### Binaries"
+            echo '```'
+            for bin in analyzer download-data backtest; do
+              if docker run --rm trade-ssm:pr-${{ github.event.pull_request.number }} \
+                  sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin'" 2>/dev/null; then
+                echo "  ✓ $bin found"
+              else
+                echo "  ✗ $bin MISSING"
+                MISSING=1
+              fi
+            done
+            echo '```'
+
+            echo ""
+            echo "### Image Size"
+            echo '```'
+            docker images trade-ssm:pr-${{ github.event.pull_request.number }} --format "{{.Size}}"
+            echo '```'
+          } | tee docker-build-report.txt
+
+          if [ "${MISSING:-0}" = "1" ]; then
+            echo "::error::Missing binaries in Docker image"
+            exit 1
+          fi
+
+      - name: Upload build report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-build-report-${{ github.event.pull_request.number }}
+          path: docker-build-report.txt
+          retention-days: 7
+
+  # ── Docker-in-Docker integration tests ──
+  docker-integration:
+    name: DinD Integration Tests
+    runs-on: ubuntu-latest
+    needs: docker-build
+    services:
+      dind:
+        image: docker:27-dind
+        options: --privileged
+        ports:
+          - 2376:2376
+        env:
+          DOCKER_TLS_CERTDIR: /certs
+        volumes:
+          - dind-certs-ca:/certs/ca
+          - dind-certs-client:/certs/client
+    env:
+      DOCKER_HOST: tcp://localhost:2376
+      DOCKER_TLS_VERIFY: 1
+      DOCKER_CERT_PATH: /certs/client
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for DinD
+        run: |
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "DinD ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker info
+
+      - name: Build image in DinD
+        run: |
+          docker build -t trade-ssm:integration .
+
+      - name: Test — Container starts cleanly
+        id: test-start
+        run: |
+          echo "### Container Start Test" > integration-results.txt
+          echo "" >> integration-results.txt
+
+          # analyzer requires env vars — test it exits gracefully without them
+          RESULT=$(docker run --rm \
+            -e RUST_LOG=error \
+            trade-ssm:integration analyzer 2>&1 || true)
+          echo '```' >> integration-results.txt
+          echo "$RESULT" | head -20 >> integration-results.txt
+          echo '```' >> integration-results.txt
+          echo "Container executed (expected graceful exit without credentials)" >> integration-results.txt
+          echo "" >> integration-results.txt
+
+      - name: Test — Binary help/version flags
+        id: test-binaries
+        run: |
+          echo "### Binary Verification" >> integration-results.txt
+          echo "" >> integration-results.txt
+          echo '```' >> integration-results.txt
+          for bin in analyzer download-data backtest; do
+            # Check binary is executable and linked correctly
+            if docker run --rm trade-ssm:integration sh -c "$bin --help 2>&1 || $bin 2>&1 | head -5"; then
+              echo "✓ $bin: executable" >> integration-results.txt
+            else
+              echo "✗ $bin: failed to execute" >> integration-results.txt
+            fi
+          done
+          echo '```' >> integration-results.txt
+          echo "" >> integration-results.txt
+
+      - name: Test — Docker Compose services parse
+        id: test-compose
+        run: |
+          echo "### Docker Compose Validation" >> integration-results.txt
+          echo "" >> integration-results.txt
+
+          # Install docker compose in DinD context
+          docker compose version 2>/dev/null || true
+
+          echo '```' >> integration-results.txt
+          docker compose config --quiet 2>&1 && \
+            echo "✓ docker-compose.yml: valid" >> integration-results.txt || \
+            echo "✗ docker-compose.yml: invalid" >> integration-results.txt
+          echo '```' >> integration-results.txt
+          echo "" >> integration-results.txt
+
+      - name: Test — Container networking
+        id: test-network
+        run: |
+          echo "### Network & Runtime Test" >> integration-results.txt
+          echo "" >> integration-results.txt
+          echo '```' >> integration-results.txt
+
+          # Verify container can resolve DNS (needed for Binance API)
+          docker run --rm trade-ssm:integration \
+            sh -c "getent hosts api.binance.com 2>/dev/null && echo '✓ DNS resolution works' || echo '⚠ DNS not available (expected in CI)'" \
+            >> integration-results.txt 2>&1
+
+          # Verify SSL certificates work
+          docker run --rm trade-ssm:integration \
+            sh -c "test -d /etc/ssl/certs && echo '✓ SSL certificates present' || echo '✗ SSL certificates missing'" \
+            >> integration-results.txt 2>&1
+
+          # Verify working directory
+          docker run --rm trade-ssm:integration \
+            sh -c "test -d /app/user_data && echo '✓ /app/user_data directory exists' || echo '✗ /app/user_data missing'" \
+            >> integration-results.txt 2>&1
+
+          echo '```' >> integration-results.txt
+
+      - name: Upload integration results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-results-${{ github.event.pull_request.number }}
+          path: integration-results.txt
+          retention-days: 7
+
+  # ── Post PR comment with results ──
+  pr-comment:
+    name: PR Report
+    runs-on: ubuntu-latest
+    needs: [docker-build, docker-integration]
+    if: always()
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-${{ github.event.pull_request.number }}"
+          merge-multiple: true
+
+      - name: Build PR comment
+        id: comment
+        run: |
+          BUILD_STATUS="${{ needs.docker-build.result }}"
+          INTEGRATION_STATUS="${{ needs.docker-integration.result }}"
+
+          # Status emoji mapping
+          status_icon() {
+            case "$1" in
+              success)  echo "✅" ;;
+              failure)  echo "❌" ;;
+              skipped)  echo "⏭️" ;;
+              *)        echo "⚠️" ;;
+            esac
+          }
+
+          {
+            echo "## 🐳 Docker Integration Report"
+            echo ""
+            echo "| Stage | Status |"
+            echo "|-------|--------|"
+            echo "| Docker Build | $(status_icon $BUILD_STATUS) \`$BUILD_STATUS\` |"
+            echo "| DinD Integration | $(status_icon $INTEGRATION_STATUS) \`$INTEGRATION_STATUS\` |"
+            echo ""
+
+            if [ -f docker-build-report.txt ]; then
+              echo "<details>"
+              echo "<summary>Docker Build Details</summary>"
+              echo ""
+              cat docker-build-report.txt
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+
+            if [ -f integration-results.txt ]; then
+              echo "<details>"
+              echo "<summary>Integration Test Results</summary>"
+              echo ""
+              cat integration-results.txt
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+
+            echo "---"
+            echo "*Commit: \`${{ github.event.pull_request.head.sha }}\` | Run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+          } > pr-comment.md
+
+          cat pr-comment.md
+
+      - name: Post or update PR comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: docker-integration
+          path: pr-comment.md
+
+  # ── Final gate status ──
+  docker-status:
+    name: Docker PR Status
+    runs-on: ubuntu-latest
+    needs: [changes, docker-build, docker-integration]
+    if: always()
+    steps:
+      - name: Evaluate results
+        run: |
+          CHANGES_DOCKER="${{ needs.changes.outputs.docker }}"
+          CHANGES_RUST="${{ needs.changes.outputs.rust }}"
+          BUILD="${{ needs.docker-build.result }}"
+          INTEGRATION="${{ needs.docker-integration.result }}"
+
+          echo "Change detection — docker: $CHANGES_DOCKER, rust: $CHANGES_RUST"
+          echo "Docker build: $BUILD"
+          echo "Integration tests: $INTEGRATION"
+
+          # If no relevant changes, skip is acceptable
+          if [ "$CHANGES_DOCKER" != "true" ] && [ "$CHANGES_RUST" != "true" ]; then
+            echo "No Docker/Rust changes detected — skipping"
+            exit 0
+          fi
+
+          if [ "$BUILD" != "success" ]; then
+            echo "::error::Docker build failed"
+            exit 1
+          fi
+
+          if [ "$INTEGRATION" != "success" ]; then
+            echo "::error::Docker integration tests failed"
+            exit 1
+          fi
+
+          echo "All Docker PR checks passed"

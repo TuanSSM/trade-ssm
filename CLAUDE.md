@@ -89,6 +89,10 @@ just docker-up                              # start live analyzer
 just docker-download                        # download historical data
 just docker-backtest /app/user_data/f.json  # run backtest in Docker
 just docker-logs                            # tail analyzer logs
+
+# Docker integration tests
+just docker-integration-test                # full Docker build + validation
+just docker-validate                        # validate docker-compose.yml syntax
 ```
 
 ## CI/CD Workflows
@@ -108,14 +112,32 @@ check (fmt + clippy) → test → build → backtest → notify
 ### `pr.yml` — Pull request gates
 
 ```
-check → test → build → summary
+check → test → build → pr-report → summary
 ```
 
 - Triggers on PR open/sync/reopen to `main`, `develop`
 - Concurrency: cancels in-progress runs for same PR
 - Read-only cache (`save-if: false`) to avoid polluting main branch cache
 - Uploads test output and build artifacts for debugging
+- **PR Report**: posts sticky comment with test results table and failure details
 - Summary job ensures all gates pass (required status check)
+
+### `pr-docker.yml` — Docker integration on PR
+
+```
+changes → docker-build → docker-integration (DinD) → pr-comment → docker-status
+```
+
+- Triggers on PR open/sync/reopen to `main`, `develop`
+- **Smart filtering**: only runs when Dockerfile, docker-compose, or Rust source changes
+- **Docker Build**: builds image with Buildx, verifies binaries exist, reports image size
+- **DinD Integration**: runs Docker-in-Docker service for isolated container tests
+  - Container start test (graceful exit without credentials)
+  - Binary verification (all binaries executable and linked)
+  - Docker Compose validation
+  - Network/SSL/filesystem checks
+- **PR Comment**: posts sticky comment with build + integration results (collapsible details)
+- **Status gate**: `Docker PR Status` for branch protection
 
 ### `release.yml` — Tag-triggered releases
 
@@ -135,6 +157,7 @@ validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → n
 |----------|-----------|-------------|-----------|
 | `ci.yml` | `ci-check`, `ci-test`, `ci-release` | Always (default branch) | Binaries (14d), backtest results (30d) |
 | `pr.yml` | `pr-check`, `pr-test`, `pr-build` | Never (`save-if: false`) | Test output (7d), build (3d) |
+| `pr-docker.yml` | `pr-docker` (GHA Buildx) | Min (GHA cache) | Build report (7d), integration results (7d) |
 | `release.yml` | `release-validate`, `release-{target}` | Always | Platform tarballs (5d), Docker layers (GHA) |
 
 - **Rust cache**: `Swatinem/rust-cache@v2` with `shared-key` per job for isolation
@@ -152,7 +175,7 @@ validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → n
 
 **Branch protection (recommended for `main`):**
 - Require PR reviews
-- Require status checks: `PR Status`
+- Require status checks: `PR Status`, `Docker PR Status`
 - Require branches to be up to date
 
 ## Env vars

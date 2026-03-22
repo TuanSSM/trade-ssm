@@ -88,6 +88,40 @@ docker-backtest datafile:
 docker-logs:
     docker compose logs -f analyzer
 
+# === Docker Integration Tests ===
+
+# Run Docker integration tests locally (builds + validates image)
+docker-integration-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Building Docker image..."
+    docker build -t trade-ssm:integration-test .
+    echo ""
+    echo "=== Binary Verification ==="
+    for bin in analyzer download-data backtest; do
+        if docker run --rm trade-ssm:integration-test sh -c "test -x /usr/local/bin/$bin"; then
+            echo "  ✓ $bin"
+        else
+            echo "  ✗ $bin MISSING" && exit 1
+        fi
+    done
+    echo ""
+    echo "=== Runtime Checks ==="
+    docker run --rm trade-ssm:integration-test sh -c "test -d /app/user_data && echo '  ✓ /app/user_data exists'"
+    docker run --rm trade-ssm:integration-test sh -c "test -d /etc/ssl/certs && echo '  ✓ SSL certificates present'"
+    echo ""
+    echo "=== Compose Validation ==="
+    docker compose config --quiet && echo "  ✓ docker-compose.yml valid"
+    echo ""
+    echo "=== Image Size ==="
+    docker images trade-ssm:integration-test --format "  {{.Size}}"
+    echo ""
+    echo "All Docker integration tests passed"
+
+# Validate docker-compose.yml syntax
+docker-validate:
+    docker compose config --quiet && echo "docker-compose.yml is valid"
+
 # === Cleanup ===
 
 # Remove build artifacts
