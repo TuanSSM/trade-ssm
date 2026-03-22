@@ -20,10 +20,13 @@ trade-ssm/
 │   ├── analyzer/          # Live polling service
 │   ├── download-data/     # Historical data fetcher (freqtrade download-data)
 │   └── backtest/          # Offline indicator replay (freqtrade backtesting)
-├── .github/workflows/     # CI: check → test → build → backtest + secrets
+├── .github/workflows/
+│   ├── ci.yml             # Push CI: check → test → build → backtest → notify
+│   ├── pr.yml             # PR gates: check → test → build → summary
+│   └── release.yml        # Tag release: validate → build matrix → Docker → GitHub Release
 ├── Dockerfile             # Multi-stage build (all binaries)
 ├── docker-compose.yml     # Services + tool profiles
-└── Makefile               # Dev workflow shortcuts
+└── justfile               # Dev workflow recipes
 ```
 
 ### Dependency graph
@@ -70,39 +73,71 @@ Market, Limit, StopMarket, StopLimit, TakeProfitMarket, TakeProfitLimit, Trailin
 ## Quick reference
 
 ```bash
-# Dev workflow
-make ci                # fmt-check + clippy + test (run before commit)
-make run               # cargo run --bin analyzer
-make test              # cargo test --workspace
-make lint              # cargo clippy --workspace -- -D warnings
+just              # list all recipes
+just ci           # fmt-check + clippy + test (run before commit)
+just run          # start live analyzer
+just test         # cargo test --workspace
+just lint         # cargo clippy -- -D warnings
 
 # Data pipeline
-make download-data                          # fetch 30d candles
-make backtest DATAFILE=user_data/file.json  # replay indicators
+just download-data                          # fetch 30d candles
+just backtest user_data/file.json           # replay indicators
 
 # Docker
-make docker-build          # build all binaries
-make docker-up             # start live analyzer
-make docker-download       # download historical data
-make docker-backtest DATAFILE=/app/user_data/file.json
-make docker-logs           # tail analyzer logs
+just docker-build                           # build all images
+just docker-up                              # start live analyzer
+just docker-download                        # download historical data
+just docker-backtest /app/user_data/f.json  # run backtest in Docker
+just docker-logs                            # tail analyzer logs
 ```
 
-## CI/CD (.github/workflows/ci.yml)
+## CI/CD Workflows
+
+### `ci.yml` — Push to main/develop + manual dispatch
 
 ```
 check (fmt + clippy) → test → build → backtest → notify
 ```
 
-**GitHub Secrets required:**
-- `TELEGRAM_BOT_TOKEN` — for deploy notifications
-- `TELEGRAM_CHAT_ID` — target chat
+- Runs on push to `main`, `develop`
+- Manual dispatch with inputs: `symbol`, `interval`, `backtest_days`, `cvd_window`
+- Uploads binaries and backtest results as artifacts
+- Telegram notification on main (gated by `TELEGRAM_NOTIFICATIONS_ENABLED` variable)
 
-**Workflow inputs (manual dispatch):**
-- `symbol` (default: BTCUSDT)
-- `interval` (default: 15m)
-- `backtest_days` (default: 7)
-- `cvd_window` (default: 15)
+### `pr.yml` — Pull request gates
+
+```
+check → test → build → summary
+```
+
+- Triggers on PR open/sync/reopen to `main`, `develop`
+- Concurrency: cancels in-progress runs for same PR
+- Summary job ensures all gates pass (required status check)
+
+### `release.yml` — Tag-triggered releases
+
+```
+validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → notify
+```
+
+- Triggers on `v*.*.*` tags
+- Cross-compiles for linux x86_64 and aarch64
+- Pushes Docker image to `ghcr.io` with semver tags
+- Creates GitHub Release with changelog and tarballs
+
+### GitHub configuration needed
+
+**Secrets:**
+- `TELEGRAM_BOT_TOKEN` — Telegram bot API token
+- `TELEGRAM_CHAT_ID` — target chat for notifications
+
+**Variables:**
+- `TELEGRAM_NOTIFICATIONS_ENABLED` — set to `true` to enable notifications
+
+**Branch protection (recommended for `main`):**
+- Require PR reviews
+- Require status checks: `PR Status`
+- Require branches to be up to date
 
 ## Env vars
 
@@ -137,7 +172,7 @@ check (fmt + clippy) → test → build → backtest → notify
 
 ## Definition of done
 
-- [ ] `make ci` passes (fmt, clippy, test)
+- [ ] `just ci` passes (fmt, clippy, test)
 - [ ] Anti-repainting test for any new indicator
 - [ ] Paper execution tests for new order types
 - [ ] AI model trait implemented for new models

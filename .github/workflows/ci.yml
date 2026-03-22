@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop, "claude/**"]
-  pull_request:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
     inputs:
       symbol:
@@ -24,18 +22,16 @@ on:
         default: "15"
         type: string
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_LOG: info
-  # Parameterized — overridable via workflow_dispatch
-  SYMBOL: ${{ inputs.symbol || 'BTCUSDT' }}
-  INTERVAL: ${{ inputs.interval || '15m' }}
-  BACKTEST_DAYS: ${{ inputs.backtest_days || '7' }}
-  CVD_WINDOW: ${{ inputs.cvd_window || '15' }}
 
 jobs:
   check:
-    name: Check & Lint
+    name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +41,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -52,60 +50,57 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Check (all targets)
-        run: cargo check --workspace --all-targets
-
   test:
     name: Test
     runs-on: ubuntu-latest
     needs: check
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --workspace -- --nocapture
+        run: cargo test --workspace --no-fail-fast
         env:
           RUST_LOG: debug
 
   build:
-    name: Build release binaries
+    name: Build
     runs-on: ubuntu-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build all binaries
+      - name: Build release binaries
         run: cargo build --release --bin analyzer --bin download-data --bin backtest
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: trade-ssm-binaries
+          name: trade-ssm-binaries-${{ github.sha }}
           path: |
             target/release/analyzer
             target/release/download-data
             target/release/backtest
+          retention-days: 14
 
   backtest:
-    name: Backtest pipeline
+    name: Backtest
     runs-on: ubuntu-latest
     needs: build
+    env:
+      SYMBOL: ${{ inputs.symbol || 'BTCUSDT' }}
+      INTERVAL: ${{ inputs.interval || '15m' }}
+      BACKTEST_DAYS: ${{ inputs.backtest_days || '7' }}
+      CVD_WINDOW: ${{ inputs.cvd_window || '15' }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build binaries
+      - name: Build tools
         run: cargo build --release --bin download-data --bin backtest
 
       - name: Download historical data
@@ -116,39 +111,33 @@ jobs:
           DATADIR=user_data \
             cargo run --release --bin download-data
 
-      - name: List downloaded data
-        run: ls -lh user_data/
-
       - name: Run backtest
         run: |
           DATAFILE=$(ls user_data/${{ env.SYMBOL }}-${{ env.INTERVAL }}-*.json | head -1) \
           CVD_WINDOW=${{ env.CVD_WINDOW }} \
             cargo run --release --bin backtest
 
-      - name: Show backtest results
-        run: cat user_data/*.backtest.json
-
       - name: Upload backtest results
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-results-${{ env.SYMBOL }}-${{ env.INTERVAL }}
+          name: backtest-${{ env.SYMBOL }}-${{ env.INTERVAL }}-${{ github.sha }}
           path: user_data/*.backtest.json
+          retention-days: 30
 
-  # === Deploy notification (requires secrets) ===
   notify:
-    name: Notify on success
+    name: Notify
     runs-on: ubuntu-latest
     needs: [check, test, build, backtest]
     if: github.ref == 'refs/heads/main' && success()
     steps:
-      - name: Send Telegram notification
-        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
-        run: |
-          curl -s -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d parse_mode="Markdown" \
-            -d text="*trade-ssm CI passed* ✅%0ABranch: \`${{ github.ref_name }}\`%0ACommit: \`${{ github.sha }}\`"
+      - name: Telegram notification
+        if: vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -sf -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="*trade-ssm CI* ✅ \`${{ github.ref_name }}\` @ \`${GITHUB_SHA::7}\`"
