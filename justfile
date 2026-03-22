@@ -50,6 +50,18 @@ download-data:
 backtest datafile:
     DATAFILE={{ datafile }} cargo run --bin backtest
 
+# Run RL backtest on historical data
+rl-backtest datafile:
+    DATAFILE={{ datafile }} cargo run --bin rl-backtest
+
+# Run RL hyperparameter optimization
+rl-optimize datafile config="config/rl-default.toml":
+    DATAFILE={{ datafile }} RL_MODE=optimize RL_CONFIG={{ config }} cargo run --bin rl-backtest
+
+# Run RL multi-timeframe comparison
+rl-multi-tf datafile config="config/rl-default.toml":
+    DATAFILE={{ datafile }} RL_MODE=multi_tf RL_CONFIG={{ config }} cargo run --bin rl-backtest
+
 # === Docker (freqtrade-inspired) ===
 
 # Build all Docker images

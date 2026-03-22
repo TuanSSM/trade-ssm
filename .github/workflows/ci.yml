@@ -90,7 +90,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build release binaries
-        run: cargo build --release --bin analyzer --bin download-data --bin backtest
+        run: cargo build --release --bin analyzer --bin download-data --bin backtest --bin rl-backtest
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
@@ -100,6 +100,7 @@ jobs:
             target/release/analyzer
             target/release/download-data
             target/release/backtest
+            target/release/rl-backtest
           retention-days: 14
 
   backtest:
@@ -146,10 +147,52 @@ jobs:
             user_data/*.json
           retention-days: 30
 
+  rl-backtest:
+    name: RL Backtest
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      SYMBOL: ${{ inputs.symbol || 'BTCUSDT' }}
+      INTERVAL: ${{ inputs.interval || '15m' }}
+      BACKTEST_DAYS: ${{ inputs.backtest_days || '7' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trade-ssm-binaries-${{ github.sha }}
+          path: bin
+
+      - name: Make binaries executable
+        run: chmod +x bin/*
+
+      - name: Download historical data
+        run: |
+          SYMBOL=${{ env.SYMBOL }} \
+          INTERVAL=${{ env.INTERVAL }} \
+          DAYS=${{ env.BACKTEST_DAYS }} \
+          DATADIR=user_data \
+            ./bin/download-data
+
+      - name: Run RL backtest (single)
+        run: |
+          DATAFILE=$(ls user_data/${{ env.SYMBOL }}-${{ env.INTERVAL }}-*.json | head -1) \
+          RL_TIMEFRAME=${{ env.INTERVAL }} \
+          RL_MODE=single \
+            ./bin/rl-backtest
+
+      - name: Upload RL backtest results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rl-backtest-${{ env.SYMBOL }}-${{ env.INTERVAL }}-${{ github.sha }}
+          path: user_data/*.rl-backtest.json
+          retention-days: 30
+
   notify:
     name: Notify
     runs-on: ubuntu-latest
-    needs: [check, test, build, backtest]
+    needs: [check, test, build, backtest, rl-backtest]
     if: github.ref == 'refs/heads/main' && success()
     steps:
       - name: Telegram notification
