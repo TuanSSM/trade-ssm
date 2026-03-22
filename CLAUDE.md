@@ -102,6 +102,7 @@ check (fmt + clippy) → test → build → backtest → notify
 - Runs on push to `main`, `develop`
 - Manual dispatch with inputs: `symbol`, `interval`, `backtest_days`, `cvd_window`
 - Uploads binaries and backtest results as artifacts
+- Backtest reuses build artifacts (no rebuild)
 - Telegram notification on main (gated by `TELEGRAM_NOTIFICATIONS_ENABLED` variable)
 
 ### `pr.yml` — Pull request gates
@@ -112,6 +113,8 @@ check → test → build → summary
 
 - Triggers on PR open/sync/reopen to `main`, `develop`
 - Concurrency: cancels in-progress runs for same PR
+- Read-only cache (`save-if: false`) to avoid polluting main branch cache
+- Uploads test output and build artifacts for debugging
 - Summary job ensures all gates pass (required status check)
 
 ### `release.yml` — Tag-triggered releases
@@ -122,8 +125,21 @@ validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → n
 
 - Triggers on `v*.*.*` tags
 - Cross-compiles for linux x86_64 and aarch64
+- Docker Buildx with GitHub Actions cache backend (`cache-from/to: type=gha`)
 - Pushes Docker image to `ghcr.io` with semver tags
 - Creates GitHub Release with changelog and tarballs
+
+### CI cache & artifact strategy
+
+| Workflow | Cache key | Save policy | Artifacts |
+|----------|-----------|-------------|-----------|
+| `ci.yml` | `ci-check`, `ci-test`, `ci-release` | Always (default branch) | Binaries (14d), backtest results (30d) |
+| `pr.yml` | `pr-check`, `pr-test`, `pr-build` | Never (`save-if: false`) | Test output (7d), build (3d) |
+| `release.yml` | `release-validate`, `release-{target}` | Always | Platform tarballs (5d), Docker layers (GHA) |
+
+- **Rust cache**: `Swatinem/rust-cache@v2` with `shared-key` per job for isolation
+- **Docker cache**: GitHub Actions cache backend via `docker/build-push-action` `cache-from`/`cache-to`
+- **Artifact reuse**: CI backtest downloads pre-built binaries instead of rebuilding
 
 ### GitHub configuration needed
 

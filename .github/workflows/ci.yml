@@ -42,6 +42,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci-check
           cache-on-failure: true
 
       - name: Format check
@@ -58,11 +59,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+          cache-on-failure: true
 
       - name: Run tests
         run: cargo test --workspace --no-fail-fast
         env:
           RUST_LOG: debug
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.sha }}
+          path: target/nextest/
+          retention-days: 7
+          if-no-files-found: ignore
 
   build:
     name: Build
@@ -72,6 +85,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-release
+          cache-on-failure: true
 
       - name: Build release binaries
         run: cargo build --release --bin analyzer --bin download-data --bin backtest
@@ -97,11 +113,15 @@ jobs:
       CVD_WINDOW: ${{ inputs.cvd_window || '15' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
-      - name: Build tools
-        run: cargo build --release --bin download-data --bin backtest
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trade-ssm-binaries-${{ github.sha }}
+          path: bin
+
+      - name: Make binaries executable
+        run: chmod +x bin/*
 
       - name: Download historical data
         run: |
@@ -109,19 +129,21 @@ jobs:
           INTERVAL=${{ env.INTERVAL }} \
           DAYS=${{ env.BACKTEST_DAYS }} \
           DATADIR=user_data \
-            cargo run --release --bin download-data
+            ./bin/download-data
 
       - name: Run backtest
         run: |
           DATAFILE=$(ls user_data/${{ env.SYMBOL }}-${{ env.INTERVAL }}-*.json | head -1) \
           CVD_WINDOW=${{ env.CVD_WINDOW }} \
-            cargo run --release --bin backtest
+            ./bin/backtest
 
       - name: Upload backtest results
         uses: actions/upload-artifact@v4
         with:
           name: backtest-${{ env.SYMBOL }}-${{ env.INTERVAL }}-${{ github.sha }}
-          path: user_data/*.backtest.json
+          path: |
+            user_data/*.backtest.json
+            user_data/*.json
           retention-days: 30
 
   notify:

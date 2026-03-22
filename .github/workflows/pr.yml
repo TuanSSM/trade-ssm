@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   check:
@@ -29,7 +30,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: pr-check
+          save-if: false
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -45,11 +47,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-test
+          save-if: false
 
       - name: Run tests
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --no-fail-fast 2>&1 | tee test-output.txt
         env:
           RUST_LOG: debug
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-test-output-${{ github.event.pull_request.number }}
+          path: test-output.txt
+          retention-days: 7
 
   build:
     name: Build
@@ -59,9 +72,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-build
+          save-if: false
 
       - name: Build release
         run: cargo build --release --workspace
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-build-${{ github.event.pull_request.number }}
+          path: |
+            target/release/analyzer
+            target/release/download-data
+            target/release/backtest
+          retention-days: 3
 
   summary:
     name: PR Status
@@ -74,7 +100,10 @@ jobs:
           if [ "${{ needs.check.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
              [ "${{ needs.build.result }}" != "success" ]; then
-            echo "One or more checks failed"
+            echo "::error::One or more checks failed"
+            echo "  check: ${{ needs.check.result }}"
+            echo "  test:  ${{ needs.test.result }}"
+            echo "  build: ${{ needs.build.result }}"
             exit 1
           fi
           echo "All PR checks passed"
