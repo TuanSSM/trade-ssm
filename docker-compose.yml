@@ -1,0 +1,13 @@
+services:
+  analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-analyzer
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - RUST_LOG=info
+      - SYMBOL=${SYMBOL:-BTCUSDT}
+      - INTERVAL=${INTERVAL:-15m}
+      - CHECK_INTERVAL_SECS=${CHECK_INTERVAL_SECS:-60}

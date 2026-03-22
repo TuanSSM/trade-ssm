@@ -1,0 +1,9 @@
+[package]
+name = "ssm-indicators"
+description = "Trading indicators for trade-ssm (CVD, liquidation analysis)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+rust_decimal = { workspace = true }

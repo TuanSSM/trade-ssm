@@ -23,6 +23,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "analyzer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ssm-core",
+ "ssm-exchange",
+ "ssm-indicators",
+ "ssm-notify",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1372,6 +1386,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssm-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rust_decimal",
+ "serde",
+]
+
+[[package]]
+name = "ssm-exchange"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "rust_decimal",
+ "serde_json",
+ "ssm-core",
+ "tracing",
+]
+
+[[package]]
+name = "ssm-indicators"
+version = "0.1.0"
+dependencies = [
+ "rust_decimal",
+ "ssm-core",
+]
+
+[[package]]
+name = "ssm-notify"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "reqwest",
+ "rust_decimal",
+ "serde_json",
+ "ssm-core",
+ "ssm-indicators",
+ "tracing",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1694,21 +1751,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "trade-ssm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "reqwest",
- "rust_decimal",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

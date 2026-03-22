@@ -1,0 +1,15 @@
+[package]
+name = "ssm-notify"
+description = "Notification dispatch for trade-ssm (Telegram bot)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+ssm-indicators = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

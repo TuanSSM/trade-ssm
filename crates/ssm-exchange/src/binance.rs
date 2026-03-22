@@ -1,10 +1,8 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
+use ssm_core::{Candle, ForceOrderResponse, Liquidation};
 use std::str::FromStr;
 
-use super::types::{Candle, ForceOrderResponse, Liquidation};
-
-const SPOT_BASE: &str = "https://api.binance.com";
 const FUTURES_BASE: &str = "https://fapi.binance.com";
 
 pub struct BinanceClient {
@@ -18,51 +16,15 @@ impl BinanceClient {
         }
     }
 
-    /// Fetch OHLCV candles from Binance spot.
-    /// `interval`: 1m, 3m, 5m, 15m, 1h, 4h, 1d
-    /// `limit`: number of candles (max 1000)
-    pub async fn fetch_klines(
-        &self,
-        symbol: &str,
-        interval: &str,
-        limit: u32,
-    ) -> Result<Vec<Candle>> {
-        let url = format!("{}/api/v3/klines", SPOT_BASE);
-        let resp = self
-            .client
-            .get(&url)
-            .query(&[
-                ("symbol", symbol),
-                ("interval", interval),
-                ("limit", &limit.to_string()),
-            ])
-            .send()
-            .await
-            .context("Failed to fetch Binance klines")?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Binance klines API returned {}: {}", status, body);
-        }
-
-        let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
-        let candles = raw
-            .into_iter()
-            .map(|k| parse_kline(&k))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(candles)
-    }
-
     /// Fetch OHLCV candles from Binance futures.
+    /// `interval`: 1m, 3m, 5m, 15m, 1h, 4h, 1d
     pub async fn fetch_futures_klines(
         &self,
         symbol: &str,
         interval: &str,
         limit: u32,
     ) -> Result<Vec<Candle>> {
-        let url = format!("{}/fapi/v1/klines", FUTURES_BASE);
+        let url = format!("{FUTURES_BASE}/fapi/v1/klines");
         let resp = self
             .client
             .get(&url)
@@ -78,32 +40,20 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Binance futures klines API returned {}: {}", status, body);
+            anyhow::bail!("Binance futures klines API returned {status}: {body}");
         }
 
         let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
-        let candles = raw
-            .into_iter()
-            .map(|k| parse_kline(&k))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(candles)
+        raw.into_iter().map(|k| parse_kline(&k)).collect()
     }
 
     /// Fetch recent forced liquidation orders from Binance futures.
-    pub async fn fetch_liquidations(
-        &self,
-        symbol: &str,
-        limit: u32,
-    ) -> Result<Vec<Liquidation>> {
-        let url = format!("{}/fapi/v1/forceOrders", FUTURES_BASE);
+    pub async fn fetch_liquidations(&self, symbol: &str, limit: u32) -> Result<Vec<Liquidation>> {
+        let url = format!("{FUTURES_BASE}/fapi/v1/forceOrders");
         let resp = self
             .client
             .get(&url)
-            .query(&[
-                ("symbol", symbol),
-                ("limit", &limit.to_string()),
-            ])
+            .query(&[("symbol", symbol), ("limit", &limit.to_string())])
             .send()
             .await
             .context("Failed to fetch Binance liquidations")?;
@@ -111,11 +61,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Binance liquidations API returned {}: {}", status, body);
+            anyhow::bail!("Binance liquidations API returned {status}: {body}");
         }
 
         let orders: Vec<ForceOrderResponse> = resp.json().await?;
-        let liquidations = orders
+        Ok(orders
             .into_iter()
             .map(|o| Liquidation {
                 symbol: o.symbol,
@@ -124,24 +74,26 @@ impl BinanceClient {
                 quantity: o.orig_qty,
                 time: o.time,
             })
-            .collect();
-
-        Ok(liquidations)
+            .collect())
     }
 }
 
-/// Parse a Binance kline array into a Candle struct.
-/// Kline format: [open_time, open, high, low, close, volume, close_time,
-///                quote_volume, trades, taker_buy_base_vol, taker_buy_quote_vol, ignore]
+impl Default for BinanceClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Parse Binance kline array: [open_time, O, H, L, C, vol, close_time,
+/// quote_vol, trades, taker_buy_base_vol, taker_buy_quote_vol, ignore]
 fn parse_kline(k: &[serde_json::Value]) -> Result<Candle> {
     let dec = |v: &serde_json::Value| -> Result<Decimal> {
-        let s = v.as_str().context("expected string for decimal")?;
-        Decimal::from_str(s).context("invalid decimal")
+        Decimal::from_str(v.as_str().context("expected string for decimal")?)
+            .context("invalid decimal")
     };
 
     let volume = dec(&k[5])?;
     let taker_buy_volume = dec(&k[9])?;
-    let taker_sell_volume = volume - taker_buy_volume;
 
     Ok(Candle {
         open_time: k[0].as_i64().context("open_time")?,
@@ -154,7 +106,7 @@ fn parse_kline(k: &[serde_json::Value]) -> Result<Candle> {
         quote_volume: dec(&k[7])?,
         trades: k[8].as_u64().context("trades")?,
         taker_buy_volume,
-        taker_sell_volume,
+        taker_sell_volume: volume - taker_buy_volume,
     })
 }
 

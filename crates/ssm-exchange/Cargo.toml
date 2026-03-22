@@ -1,0 +1,13 @@
+[package]
+name = "ssm-exchange"
+description = "Exchange connectors for trade-ssm (Binance REST)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

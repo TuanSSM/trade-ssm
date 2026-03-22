@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-/// OHLCV candle from an exchange
+/// OHLCV candle from an exchange.
 #[derive(Debug, Clone)]
 pub struct Candle {
     pub open_time: i64,
@@ -17,7 +17,7 @@ pub struct Candle {
     pub taker_sell_volume: Decimal,
 }
 
-/// Liquidation event from futures exchange
+/// Liquidation event from futures exchange.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Liquidation {
     pub symbol: String,
@@ -29,7 +29,7 @@ pub struct Liquidation {
     pub time: i64,
 }
 
-/// Wrapper for Binance force order response
+/// Binance force order API response shape.
 #[derive(Debug, Deserialize)]
 pub struct ForceOrderResponse {
     pub symbol: String,
@@ -41,33 +41,24 @@ pub struct ForceOrderResponse {
     pub time: i64,
 }
 
-/// Liquidation tier classification
+/// Liquidation tier classification (aggr.trade-inspired thresholds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiquidationTier {
-    /// > $1,000
-    Small,
-    /// > $10,000
-    Medium,
-    /// > $30,000
-    Large,
-    /// > $100,000
-    Massive,
+    Small,   // >= $1K
+    Medium,  // >= $10K
+    Large,   // >= $30K
+    Massive, // >= $100K
 }
 
 impl LiquidationTier {
     pub fn classify(usd_value: Decimal) -> Option<Self> {
-        let thousand = Decimal::from(1_000);
-        let ten_k = Decimal::from(10_000);
-        let thirty_k = Decimal::from(30_000);
-        let hundred_k = Decimal::from(100_000);
-
-        if usd_value >= hundred_k {
+        if usd_value >= Decimal::from(100_000) {
             Some(Self::Massive)
-        } else if usd_value >= thirty_k {
+        } else if usd_value >= Decimal::from(30_000) {
             Some(Self::Large)
-        } else if usd_value >= ten_k {
+        } else if usd_value >= Decimal::from(10_000) {
             Some(Self::Medium)
-        } else if usd_value >= thousand {
+        } else if usd_value >= Decimal::from(1_000) {
             Some(Self::Small)
         } else {
             None
@@ -81,5 +72,37 @@ impl LiquidationTier {
             Self::Large => "$30K+",
             Self::Massive => "$100K+",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tier_classify() {
+        assert_eq!(LiquidationTier::classify(Decimal::from(500)), None);
+        assert_eq!(
+            LiquidationTier::classify(Decimal::from(1_000)),
+            Some(LiquidationTier::Small)
+        );
+        assert_eq!(
+            LiquidationTier::classify(Decimal::from(10_000)),
+            Some(LiquidationTier::Medium)
+        );
+        assert_eq!(
+            LiquidationTier::classify(Decimal::from(30_000)),
+            Some(LiquidationTier::Large)
+        );
+        assert_eq!(
+            LiquidationTier::classify(Decimal::from(100_000)),
+            Some(LiquidationTier::Massive)
+        );
+    }
+
+    #[test]
+    fn test_tier_labels() {
+        assert_eq!(LiquidationTier::Small.label(), "$1K+");
+        assert_eq!(LiquidationTier::Massive.label(), "$100K+");
     }
 }

@@ -1,156 +1,100 @@
-# trade-ssm — Trade State Space Model
+# trade-ssm
 
-A high-performance Rust-based crypto trading system inspired by freqtrade and aggr.trade. Designed for low-latency signal generation, multi-exchange data aggregation, and automated Telegram notifications.
-
-## Project Goals
-
-- **Rust-native performance**: Microsecond execution, zero GC pauses, minimal memory footprint
-- **Multi-exchange aggregation**: Aggregate order flow across Binance, Bybit, Coinbase, Deribit, Hyperliquid, OKX, Kraken, Bitget (inspired by [aggr.trade](https://aggr.trade))
-- **Anti-repainting**: Only signal on closed candles — never look ahead
-- **Telegram-first alerts**: Real-time CVD, liquidation, and strategy signals via Telegram bot
-- **Pluggable strategies**: Trait-based strategy framework similar to freqtrade's `populate_indicators` / `populate_entry_trend` / `populate_exit_trend`
+Rust crypto trading system. CVD + liquidation tracking with Telegram alerts.
+Workspace microservices architecture via Docker Compose.
 
 ## Architecture
 
 ```
-src/
-├── main.rs              # Entry point, CLI, scheduler
-├── exchange/
-│   ├── mod.rs           # Exchange trait + registry
-│   ├── binance.rs       # Binance REST + WebSocket
-│   └── types.rs         # Candle, Trade, Liquidation types
-├── indicators/
-│   ├── mod.rs           # Indicator trait
-│   ├── cvd.rs           # Cumulative Volume Delta
-│   ├── liquidations.rs  # Tiered liquidation tracking
-│   ├── premium.rs       # Spot vs perp premium
-│   └── keltner.rs       # Keltner Channel
-├── strategy/
-│   ├── mod.rs           # Strategy trait
-│   └── cvd_liq.rs       # CVD + liquidation strategy
-├── signals/
-│   ├── mod.rs           # Signal types
-│   └── telegram.rs      # Telegram bot integration
-├── aggregation/
-│   └── mod.rs           # Multi-exchange aggregator
-├── backtest/
-│   └── mod.rs           # Backtesting engine
-└── data/
-    └── mod.rs           # Historical data management
+trade-ssm/
+├── crates/
+│   ├── ssm-core/          # Shared types: Candle, Liquidation, LiquidationTier
+│   ├── ssm-exchange/      # Exchange connectors (Binance REST)
+│   ├── ssm-indicators/    # Pure indicators: CVD, liquidation analysis
+│   └── ssm-notify/        # Notification dispatch (Telegram bot)
+├── services/
+│   └── analyzer/          # Main service binary (polling loop)
+├── Dockerfile             # Multi-stage build for analyzer
+├── docker-compose.yml     # Service orchestration
+└── Makefile               # Dev workflow shortcuts
 ```
 
-## Key Concepts
+### Dependency graph
 
-### Candle Anti-Repainting Rules
-1. **Never act on the current (open) candle** — wait for candle close
-2. **Indicators must use `[..len-1]`** — exclude the forming candle from calculations
-3. **No look-ahead bias** — backtesting must process candles sequentially
-4. **CVD resets** — clearly document when CVD accumulator resets vs. continues
-
-### Cumulative Volume Delta (CVD)
-Tracks directional volume flow: `CVD += buy_volume - sell_volume` per candle. Aggregated across exchanges for stronger signal. Analyzed over configurable windows (default: last 15 candles).
-
-### Liquidation Tiers (from aggr.trade)
-- Tier 1: > $1,000
-- Tier 2: > $10,000
-- Tier 3: > $30,000
-- Tier 4: > $100,000+
-
-### Telegram Signals
-Messages include: symbol, timeframe, CVD trend (bullish/bearish/neutral), liquidation summary, premium delta, and timestamp.
-
-## Exchange Data Fetching
-
-### Binance Klines (OHLCV)
-```bash
-# 15-minute candles, last 15
-curl "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=15"
-
-# 1-hour candles
-curl "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=15"
-
-# 4-hour candles
-curl "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=15"
+```
+ssm-core          ← zero external deps (types only)
+ssm-exchange      ← ssm-core, reqwest
+ssm-indicators    ← ssm-core, rust_decimal
+ssm-notify        ← ssm-core, ssm-indicators, reqwest
+analyzer          ← all crates above
 ```
 
-### Binance Futures Liquidations
-```bash
-# Recent liquidation orders
-curl "https://fapi.binance.com/fapi/v1/forceOrders?symbol=BTCUSDT&limit=100"
-```
+### Crate boundaries
 
-### Bybit Klines
-```bash
-curl "https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=15&limit=15"
-```
+| Crate | Concern | AI context hint |
+|-------|---------|-----------------|
+| `ssm-core` | Domain types shared across all crates | Read first — <200 lines |
+| `ssm-exchange` | HTTP calls to exchange REST APIs | Binance only for MVP |
+| `ssm-indicators` | Pure math on `&[Candle]` slices | No I/O, no async |
+| `ssm-notify` | Telegram message formatting + sending | Depends on indicator types |
+| `analyzer` | Wiring: fetch → analyze → notify loop | Thin main, ~60 lines |
 
-## Development Workflow
+## Quick reference
 
 ```bash
-# Build
-cargo build
-
-# Run (requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars)
-TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy cargo run
-
-# Test
-cargo test
-
-# Format
-cargo fmt
-
-# Lint
-cargo clippy -- -D warnings
-
-# Benchmark (when criterion benchmarks exist)
-cargo bench
+make ci           # fmt-check + clippy + test (run before commit)
+make run          # cargo run --bin analyzer
+make docker-up    # build + start via docker compose
+make test         # cargo test --workspace
+make lint         # cargo clippy --workspace -- -D warnings
 ```
 
-## Environment Variables
+## Env vars
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Yes | Telegram bot API token from @BotFather |
-| `TELEGRAM_CHAT_ID` | Yes | Target chat/channel ID for notifications |
-| `BINANCE_API_KEY` | No | For authenticated endpoints (not needed for public market data) |
-| `CHECK_INTERVAL_SECS` | No | Polling interval in seconds (default: 60) |
+| Var | Required | Default |
+|-----|----------|---------|
+| `TELEGRAM_BOT_TOKEN` | yes | — |
+| `TELEGRAM_CHAT_ID` | yes | — |
+| `SYMBOL` | no | BTCUSDT |
+| `INTERVAL` | no | 15m |
+| `CHECK_INTERVAL_SECS` | no | 60 |
 
-## Key Dependencies
+Copy `.env.example` to `.env` and fill in values.
 
-| Crate | Purpose |
-|-------|---------|
-| `tokio` | Async runtime |
-| `reqwest` | HTTP client for exchange REST APIs |
-| `serde` / `serde_json` | JSON serialization |
-| `rust_decimal` | Precise decimal arithmetic for prices |
-| `chrono` | Timestamps and time handling |
-| `tokio-tungstenite` | WebSocket connections (future) |
-| `ta` | Technical analysis indicators |
+## Anti-repainting rules
+
+1. Never signal on the forming (current) candle
+2. Indicators receive only closed candles via `&candles[..len-1]`
+3. Append-one-candle test: values at `[0..N]` must not change when candle `N+1` is added
+4. CVD `analyze_cvd()` is a pure function — same input = same output
 
 ## Conventions
 
-- **Error handling**: Use `anyhow::Result` for application errors, `thiserror` for library errors
-- **Async**: All I/O operations are async via tokio
-- **Naming**: snake_case for functions/variables, PascalCase for types, SCREAMING_SNAKE for constants
-- **Decimal precision**: Use `rust_decimal::Decimal` for all price/volume values — never `f64`
-- **Logging**: Use `tracing` crate with structured logging
+- `rust_decimal::Decimal` for all prices/volumes, never `f64`
+- `anyhow::Result` in binaries, domain errors in libraries
+- All I/O is async (tokio), indicators are sync pure functions
+- One test file per module, inline `#[cfg(test)]` blocks
 
-## Definition of Done
+## Definition of done
 
-A feature is complete when:
-1. Unit tests pass (`cargo test`)
-2. No candle repainting — verified by sequential-only data access
-3. Clippy clean (`cargo clippy -- -D warnings`)
-4. Formatted (`cargo fmt --check`)
-5. Telegram notification works for the feature's signals
-6. Documented in this file if it changes architecture
+- [ ] `make ci` passes (fmt, clippy, test)
+- [ ] Anti-repainting test for any new indicator
+- [ ] Telegram message formats correctly for new signals
+- [ ] Docker builds successfully
 
-## External References
+## Exchange API reference
 
-- [CCXT Rust](https://github.com/Praying/ccxt-rust) — Exchange abstraction
-- [freqtrade](https://github.com/freqtrade/freqtrade) — Strategy architecture inspiration
-- [aggr.trade](https://github.com/Tucsky/aggr) — Multi-exchange aggregation inspiration
-- [aggr-templates](https://github.com/cryptorife/aggr-templates) — Dashboard templates
-- [Barter-rs](https://docs.rs/barter) — Rust trading framework reference
-- [ta-rs](https://docs.rs/ta) — Technical analysis in Rust
-- [Binance API](https://binance-docs.github.io/apidocs/) — Exchange REST/WS docs
+```bash
+# Binance futures klines (15m, last 16 candles)
+curl "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=16"
+
+# Binance futures liquidations
+curl "https://fapi.binance.com/fapi/v1/forceOrders?symbol=BTCUSDT&limit=100"
+```
+
+## Links
+
+- [CCXT Rust](https://github.com/Praying/ccxt-rust)
+- [freqtrade](https://github.com/freqtrade/freqtrade) — strategy arch inspiration
+- [aggr.trade](https://github.com/Tucsky/aggr) — aggregation inspiration
+- [Binance API](https://binance-docs.github.io/apidocs/)

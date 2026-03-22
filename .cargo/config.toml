@@ -1,0 +1,5 @@
+# Cargo aliases for dev workflows
+[alias]
+ci = "check --workspace --all-targets"
+ta = "test --workspace"
+ca = "clippy --workspace --all-targets -- -D warnings"

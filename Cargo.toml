@@ -1,10 +1,19 @@
-[package]
-name = "trade-ssm"
+[workspace]
+resolver = "2"
+members = [
+    "crates/ssm-core",
+    "crates/ssm-exchange",
+    "crates/ssm-indicators",
+    "crates/ssm-notify",
+    "services/analyzer",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "High-performance Rust crypto trading system with CVD, liquidation tracking, and Telegram alerts"
 
-[dependencies]
+[workspace.dependencies]
+# Shared across crates — single version source of truth
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
@@ -14,3 +23,9 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Internal crates
+ssm-core = { path = "crates/ssm-core" }
+ssm-exchange = { path = "crates/ssm-exchange" }
+ssm-indicators = { path = "crates/ssm-indicators" }
+ssm-notify = { path = "crates/ssm-notify" }
