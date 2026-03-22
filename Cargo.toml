@@ -1,0 +1,16 @@
+[package]
+name = "trade-ssm"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance Rust crypto trading system with CVD, liquidation tracking, and Telegram alerts"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
