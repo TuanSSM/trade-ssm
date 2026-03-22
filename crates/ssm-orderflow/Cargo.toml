@@ -1,0 +1,10 @@
+[package]
+name = "ssm-orderflow"
+description = "Order flow analysis: footprint charts, delta, absorption, sweeps, imbalance, market profile (RIFEBTC-inspired)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }

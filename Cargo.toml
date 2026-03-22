@@ -12,6 +12,12 @@ members = [
     "services/download-data",
     "services/backtest",
     "services/rl-backtest",
+    "crates/ssm-nats",
+    "crates/ssm-orderflow",
+    "services/data-feed",
+    "services/signal",
+    "services/execution",
+    "services/rl-trainer",
 ]
 
 [workspace.package]
@@ -30,6 +36,14 @@ anyhow = "1"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+async-nats = "0.38"
+url = "2"
+rand = "0.8"
+rayon = "1"
+hmac = "0.12"
+sha2 = "0.10"
 
 # Internal crates
 ssm-core = { path = "crates/ssm-core" }
@@ -39,3 +53,5 @@ ssm-notify = { path = "crates/ssm-notify" }
 ssm-execution = { path = "crates/ssm-execution" }
 ssm-strategy = { path = "crates/ssm-strategy" }
 ssm-ai = { path = "crates/ssm-ai" }
+ssm-nats = { path = "crates/ssm-nats" }
+ssm-orderflow = { path = "crates/ssm-orderflow" }

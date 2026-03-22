@@ -7,6 +7,8 @@ edition.workspace = true
 [dependencies]
 ssm-core = { workspace = true }
 ssm-indicators = { workspace = true }
+ssm-orderflow = { workspace = true }
+ssm-ai = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
