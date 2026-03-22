@@ -107,7 +107,9 @@ check (fmt + clippy) → test → build → backtest → notify
 - Manual dispatch with inputs: `symbol`, `interval`, `backtest_days`, `cvd_window`
 - Uploads binaries and backtest results as artifacts
 - Backtest reuses build artifacts (no rebuild)
-- Telegram notification on main (gated by `TELEGRAM_NOTIFICATIONS_ENABLED` variable)
+- Telegram notification on main — success + failure via `appleboy/telegram-action` (HTML format)
+- Gated by `TELEGRAM_NOTIFICATIONS_ENABLED` variable
+- Compact message: job status grid, clickable Run + Artifacts links
 
 ### `pr.yml` — Pull request gates
 
@@ -163,6 +165,21 @@ validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → n
 - **Rust cache**: `Swatinem/rust-cache@v2` with `shared-key` per job for isolation
 - **Docker cache**: GitHub Actions cache backend via `docker/build-push-action` `cache-from`/`cache-to`
 - **Artifact reuse**: CI backtest downloads pre-built binaries instead of rebuilding
+
+### Telegram notifications
+
+All workflows use [`appleboy/telegram-action`](https://github.com/appleboy/telegram-action) with HTML format:
+
+| Workflow | Trigger | Content |
+|----------|---------|---------|
+| `ci.yml` | main push (success + failure) | Job status grid, commit SHA, Run + Artifacts links |
+| `pr.yml` | PR failure only | PR link, job statuses, Run + Artifacts links |
+| `pr-docker.yml` | Docker failure only | PR link, build/integration status, Run + Artifacts links |
+| `release.yml` | Release success | Version, `docker pull` command, Release Notes + Build links |
+
+- **Format**: HTML (`<b>`, `<code>`, `<a href>`) — more reliable than Telegram Markdown v1
+- **Gating**: all require `vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true'`
+- **Links**: each message includes clickable "View Run" and "Artifacts" deep links
 
 ### GitHub configuration needed
 
