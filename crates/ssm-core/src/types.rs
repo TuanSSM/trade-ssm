@@ -1,8 +1,8 @@
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// OHLCV candle from an exchange.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candle {
     pub open_time: i64,
     pub open: Decimal,

@@ -47,6 +47,40 @@ impl BinanceClient {
         raw.into_iter().map(|k| parse_kline(&k)).collect()
     }
 
+    /// Fetch futures klines with explicit time range (for historical download).
+    pub async fn fetch_futures_klines_range(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: u32,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<Vec<Candle>> {
+        let url = format!("{FUTURES_BASE}/fapi/v1/klines");
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[
+                ("symbol", symbol),
+                ("interval", interval),
+                ("limit", &limit.to_string()),
+                ("startTime", &start_time.to_string()),
+                ("endTime", &end_time.to_string()),
+            ])
+            .send()
+            .await
+            .context("Failed to fetch Binance futures klines range")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Binance futures klines range API returned {status}: {body}");
+        }
+
+        let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
+        raw.into_iter().map(|k| parse_kline(&k)).collect()
+    }
+
     /// Fetch recent forced liquidation orders from Binance futures.
     pub async fn fetch_liquidations(&self, symbol: &str, limit: u32) -> Result<Vec<Liquidation>> {
         let url = format!("{FUTURES_BASE}/fapi/v1/forceOrders");

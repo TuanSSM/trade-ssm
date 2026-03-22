@@ -1,9 +1,11 @@
 services:
+  # === Live trading monitor (freqtrade: trade) ===
   analyzer:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: trade-ssm-analyzer
+    command: ["analyzer"]
     restart: unless-stopped
     env_file: .env
     environment:
@@ -11,3 +13,35 @@ services:
       - SYMBOL=${SYMBOL:-BTCUSDT}
       - INTERVAL=${INTERVAL:-15m}
       - CHECK_INTERVAL_SECS=${CHECK_INTERVAL_SECS:-60}
+
+  # === Download historical data (freqtrade: download-data) ===
+  download-data:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-download
+    command: ["download-data"]
+    profiles: ["tools"]
+    volumes:
+      - ./user_data:/app/user_data
+    environment:
+      - RUST_LOG=info
+      - SYMBOL=${SYMBOL:-BTCUSDT}
+      - INTERVAL=${INTERVAL:-15m}
+      - DAYS=${DAYS:-30}
+      - DATADIR=/app/user_data
+
+  # === Run backtest on downloaded data (freqtrade: backtesting) ===
+  backtest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-backtest
+    command: ["backtest"]
+    profiles: ["tools"]
+    volumes:
+      - ./user_data:/app/user_data
+    environment:
+      - RUST_LOG=info
+      - DATAFILE=${DATAFILE:-}
+      - CVD_WINDOW=${CVD_WINDOW:-15}

@@ -1,4 +1,5 @@
 /target
+/user_data
 .env
 *.swp
 *.swo

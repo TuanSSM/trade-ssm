@@ -6,6 +6,8 @@ members = [
     "crates/ssm-indicators",
     "crates/ssm-notify",
     "services/analyzer",
+    "services/download-data",
+    "services/backtest",
 ]
 
 [workspace.package]

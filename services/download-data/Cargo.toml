@@ -1,0 +1,13 @@
+[package]
+name = "download-data"
+description = "Fetch and persist historical candle data from Binance futures"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-exchange = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

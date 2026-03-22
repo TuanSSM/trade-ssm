@@ -1,0 +1,16 @@
+[package]
+name = "backtest"
+description = "Offline backtest: replay historical candles through indicators"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+ssm-exchange = { workspace = true }
+ssm-indicators = { workspace = true }
+rust_decimal = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

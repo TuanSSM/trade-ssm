@@ -70,6 +70,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "backtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "ssm-core",
+ "ssm-exchange",
+ "ssm-indicators",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -222,6 +237,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "download-data"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ssm-exchange",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1399,10 +1426,13 @@ name = "ssm-exchange"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "reqwest",
  "rust_decimal",
+ "serde",
  "serde_json",
  "ssm-core",
+ "tokio",
  "tracing",
 ]
 
