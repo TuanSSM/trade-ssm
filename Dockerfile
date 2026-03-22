@@ -8,7 +8,7 @@ COPY crates crates
 COPY services services
 
 # Build all binaries in one layer for cache efficiency
-RUN cargo build --release --bin analyzer --bin download-data --bin backtest
+RUN cargo build --release --bin analyzer --bin download-data --bin backtest --bin rl-backtest
 
 FROM debian:bookworm-slim
 
@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/
 COPY --from=builder /app/target/release/analyzer /usr/local/bin/analyzer
 COPY --from=builder /app/target/release/download-data /usr/local/bin/download-data
 COPY --from=builder /app/target/release/backtest /usr/local/bin/backtest
+COPY --from=builder /app/target/release/rl-backtest /usr/local/bin/rl-backtest
 
 RUN mkdir -p /app/user_data
 WORKDIR /app

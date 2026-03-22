@@ -98,7 +98,7 @@ docker-integration-test:
     docker build -t trade-ssm:integration-test .
     echo ""
     echo "=== Binary Verification ==="
-    for bin in analyzer download-data backtest; do
+    for bin in analyzer download-data backtest rl-backtest; do
         if docker run --rm trade-ssm:integration-test sh -c "test -x /usr/local/bin/$bin"; then
             echo "  ✓ $bin"
         else

@@ -79,7 +79,7 @@ jobs:
 
             echo "### Binaries"
             echo '```'
-            for bin in analyzer download-data backtest; do
+            for bin in analyzer download-data backtest rl-backtest; do
               if docker run --rm trade-ssm:pr-${{ github.event.pull_request.number }} \
                   sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin'" 2>/dev/null; then
                 echo "  ✓ $bin found"
@@ -120,16 +120,11 @@ jobs:
         image: docker:27-dind
         options: --privileged
         ports:
-          - 2376:2376
+          - 2375:2375
         env:
-          DOCKER_TLS_CERTDIR: /certs
-        volumes:
-          - dind-certs-ca:/certs/ca
-          - dind-certs-client:/certs/client
+          DOCKER_TLS_CERTDIR: ""
     env:
-      DOCKER_HOST: tcp://localhost:2376
-      DOCKER_TLS_VERIFY: 1
-      DOCKER_CERT_PATH: /certs/client
+      DOCKER_HOST: tcp://localhost:2375
     steps:
       - uses: actions/checkout@v6
 
@@ -140,83 +135,97 @@ jobs:
               echo "DinD ready after ${i}s"
               break
             fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::DinD failed to start after 30s"
+              exit 1
+            fi
             sleep 1
           done
-          docker info
 
       - name: Build image in DinD
-        run: |
-          docker build -t trade-ssm:integration .
+        run: docker build -t trade-ssm:integration .
 
       - name: Test — Container starts cleanly
         id: test-start
         run: |
-          echo "### Container Start Test" > integration-results.txt
-          echo "" >> integration-results.txt
+          {
+            echo "### Container Start Test"
+            echo ""
+            echo '```'
+            # analyzer requires env vars — verify it exits gracefully without them
+            docker run --rm -e RUST_LOG=error \
+              trade-ssm:integration analyzer 2>&1 | head -20 || true
+            echo '```'
+            echo "Container executed (expected graceful exit without credentials)"
+            echo ""
+          } > integration-results.txt
 
-          # analyzer requires env vars — test it exits gracefully without them
-          RESULT=$(docker run --rm \
-            -e RUST_LOG=error \
-            trade-ssm:integration analyzer 2>&1 || true)
-          echo '```' >> integration-results.txt
-          echo "$RESULT" | head -20 >> integration-results.txt
-          echo '```' >> integration-results.txt
-          echo "Container executed (expected graceful exit without credentials)" >> integration-results.txt
-          echo "" >> integration-results.txt
-
-      - name: Test — Binary help/version flags
+      - name: Test — Binary verification
         id: test-binaries
         run: |
-          echo "### Binary Verification" >> integration-results.txt
-          echo "" >> integration-results.txt
-          echo '```' >> integration-results.txt
-          for bin in analyzer download-data backtest; do
-            # Check binary is executable and linked correctly
-            if docker run --rm trade-ssm:integration sh -c "$bin --help 2>&1 || $bin 2>&1 | head -5"; then
-              echo "✓ $bin: executable" >> integration-results.txt
+          {
+            echo "### Binary Verification"
+            echo ""
+            echo '```'
+          } >> integration-results.txt
+
+          FAILED=0
+          for bin in analyzer download-data backtest rl-backtest; do
+            if docker run --rm trade-ssm:integration sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin: executable'"; then
+              docker run --rm trade-ssm:integration sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin: executable'" >> integration-results.txt
             else
-              echo "✗ $bin: failed to execute" >> integration-results.txt
+              echo "✗ $bin: missing or not executable" >> integration-results.txt
+              FAILED=1
             fi
           done
+
           echo '```' >> integration-results.txt
           echo "" >> integration-results.txt
 
-      - name: Test — Docker Compose services parse
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::One or more binaries missing from Docker image"
+            exit 1
+          fi
+
+      - name: Test — Docker Compose validation
         id: test-compose
         run: |
-          echo "### Docker Compose Validation" >> integration-results.txt
-          echo "" >> integration-results.txt
+          {
+            echo "### Docker Compose Validation"
+            echo ""
+            echo '```'
+          } >> integration-results.txt
 
-          # Install docker compose in DinD context
-          docker compose version 2>/dev/null || true
-
-          echo '```' >> integration-results.txt
-          docker compose config --quiet 2>&1 && \
+          # docker compose runs on the runner (host), not in DinD
+          DOCKER_HOST="" docker compose config --quiet 2>&1 && \
             echo "✓ docker-compose.yml: valid" >> integration-results.txt || \
             echo "✗ docker-compose.yml: invalid" >> integration-results.txt
+
           echo '```' >> integration-results.txt
           echo "" >> integration-results.txt
 
-      - name: Test — Container networking
-        id: test-network
+      - name: Test — Container runtime checks
+        id: test-runtime
         run: |
-          echo "### Network & Runtime Test" >> integration-results.txt
-          echo "" >> integration-results.txt
-          echo '```' >> integration-results.txt
+          {
+            echo "### Runtime Environment"
+            echo ""
+            echo '```'
+          } >> integration-results.txt
 
-          # Verify container can resolve DNS (needed for Binance API)
-          docker run --rm trade-ssm:integration \
-            sh -c "getent hosts api.binance.com 2>/dev/null && echo '✓ DNS resolution works' || echo '⚠ DNS not available (expected in CI)'" \
-            >> integration-results.txt 2>&1
-
-          # Verify SSL certificates work
+          # SSL certificates
           docker run --rm trade-ssm:integration \
             sh -c "test -d /etc/ssl/certs && echo '✓ SSL certificates present' || echo '✗ SSL certificates missing'" \
             >> integration-results.txt 2>&1
 
-          # Verify working directory
+          # Working directory
           docker run --rm trade-ssm:integration \
             sh -c "test -d /app/user_data && echo '✓ /app/user_data directory exists' || echo '✗ /app/user_data missing'" \
+            >> integration-results.txt 2>&1
+
+          # DNS resolution (best-effort, may not work in all CI environments)
+          docker run --rm trade-ssm:integration \
+            sh -c "getent hosts api.binance.com >/dev/null 2>&1 && echo '✓ DNS resolution works' || echo '⚠ DNS not available (expected in some CI)'" \
             >> integration-results.txt 2>&1
 
           echo '```' >> integration-results.txt
