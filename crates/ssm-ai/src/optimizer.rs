@@ -179,6 +179,11 @@ pub fn apply_params(base: &RlConfig, params: &HashMap<String, f64>) -> RlConfig 
             "close_penalty_rate" => config.reward.close_penalty_rate = value,
             "win_bonus" => config.reward.win_bonus = value,
             "drawdown_penalty_rate" => config.reward.drawdown_penalty_rate = value,
+            "hedge_mode" => config.env.hedge_mode = value != 0.0,
+            "max_gross_exposure" => config.env.max_gross_exposure = value,
+            "exposure_penalty_rate" => config.reward.exposure_penalty_rate = value,
+            "exposure_penalty_threshold" => config.reward.exposure_penalty_threshold = value,
+            "hedge_bonus" => config.reward.hedge_bonus = value,
             _ => {
                 tracing::warn!(param = name, "unknown parameter in search space");
             }
