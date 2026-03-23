@@ -373,14 +373,20 @@ mod tests {
         // All negative returns: sortino should be negative
         let returns = vec![-0.01, -0.02, -0.005, -0.015];
         let sortino = compute_sortino(&returns, 35040.0);
-        assert!(sortino < 0.0, "sortino should be negative for all-loss returns");
+        assert!(
+            sortino < 0.0,
+            "sortino should be negative for all-loss returns"
+        );
     }
 
     #[test]
     fn sharpe_with_positive_returns() {
         let returns = vec![0.01, 0.02, 0.015, 0.012];
         let sharpe = compute_sharpe(&returns, 35040.0);
-        assert!(sharpe > 0.0, "sharpe should be positive for all-gain returns");
+        assert!(
+            sharpe > 0.0,
+            "sharpe should be positive for all-gain returns"
+        );
     }
 
     #[test]

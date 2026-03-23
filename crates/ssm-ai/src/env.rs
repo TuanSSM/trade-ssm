@@ -529,7 +529,10 @@ mod tests {
                 penalty_observed = true;
             }
         }
-        assert!(penalty_observed, "hold penalty should apply after threshold");
+        assert!(
+            penalty_observed,
+            "hold penalty should apply after threshold"
+        );
     }
 
     #[test]
@@ -542,7 +545,10 @@ mod tests {
         let mut env = TradingEnv::new(candles);
         env.reset();
         let (obs, _) = env.step(AIAction::EnterLong);
-        assert!(obs.equity > obs.balance, "equity should exceed balance with unrealized gain");
+        assert!(
+            obs.equity > obs.balance,
+            "equity should exceed balance with unrealized gain"
+        );
         assert!(obs.unrealized_pnl > 0.0);
     }
 
@@ -609,13 +615,15 @@ mod tests {
             win_bonus: 1.0,
             ..RewardConfig::default()
         };
-        let mut env_bonus =
-            TradingEnv::with_config(candles, EnvConfig::default(), reward_cfg);
+        let mut env_bonus = TradingEnv::with_config(candles, EnvConfig::default(), reward_cfg);
         env_bonus.reset();
         env_bonus.step(AIAction::EnterLong);
         let (_, reward_yes) = env_bonus.step(AIAction::ExitLong);
 
-        assert!(reward_yes > reward_no, "win bonus should increase reward for profitable trade");
+        assert!(
+            reward_yes > reward_no,
+            "win bonus should increase reward for profitable trade"
+        );
     }
 
     // --- Tests from main (theirs) ---

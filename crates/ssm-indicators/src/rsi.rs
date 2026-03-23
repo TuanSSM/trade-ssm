@@ -265,7 +265,10 @@ mod tests {
         // All up => RSI high
         for val in &result {
             let v = val.to_f64().unwrap();
-            assert!(v > 80.0, "RSI with small period in uptrend should be high, got {v}");
+            assert!(
+                v > 80.0,
+                "RSI with small period in uptrend should be high, got {v}"
+            );
         }
     }
 }

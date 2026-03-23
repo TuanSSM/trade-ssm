@@ -182,11 +182,11 @@ mod tests {
             serde_json::json!("51000.00"),
             serde_json::json!("49000.00"),
             serde_json::json!("50500.00"),
-            serde_json::json!("200.00"),  // total volume
+            serde_json::json!("200.00"), // total volume
             serde_json::json!(1899999i64),
             serde_json::json!("10000000.00"),
             serde_json::json!(1000u64),
-            serde_json::json!("120.00"),  // taker_buy_volume
+            serde_json::json!("120.00"), // taker_buy_volume
             serde_json::json!("6000000.00"),
             serde_json::json!("0"),
         ];
@@ -194,8 +194,14 @@ mod tests {
         let candle = parse_kline(&raw).unwrap();
         // taker_sell_volume = volume - taker_buy_volume = 200 - 120 = 80
         assert_eq!(candle.volume, Decimal::from_str("200.00").unwrap());
-        assert_eq!(candle.taker_buy_volume, Decimal::from_str("120.00").unwrap());
-        assert_eq!(candle.taker_sell_volume, Decimal::from_str("80.00").unwrap());
+        assert_eq!(
+            candle.taker_buy_volume,
+            Decimal::from_str("120.00").unwrap()
+        );
+        assert_eq!(
+            candle.taker_sell_volume,
+            Decimal::from_str("80.00").unwrap()
+        );
         assert_eq!(
             candle.taker_sell_volume,
             candle.volume - candle.taker_buy_volume
@@ -205,18 +211,18 @@ mod tests {
     #[test]
     fn test_parse_kline_all_fields() {
         let raw = vec![
-            serde_json::json!(1609459200000i64),   // open_time
-            serde_json::json!("29000.00"),          // open
-            serde_json::json!("29500.00"),          // high
-            serde_json::json!("28800.00"),          // low
-            serde_json::json!("29200.00"),          // close
-            serde_json::json!("100.50"),            // volume
-            serde_json::json!(1609462799999i64),    // close_time
-            serde_json::json!("2920000.00"),        // quote_volume
-            serde_json::json!(5000u64),             // trades
-            serde_json::json!("60.30"),             // taker_buy_volume
-            serde_json::json!("1752000.00"),        // taker_buy_quote_volume (unused)
-            serde_json::json!("0"),                 // ignore
+            serde_json::json!(1609459200000i64), // open_time
+            serde_json::json!("29000.00"),       // open
+            serde_json::json!("29500.00"),       // high
+            serde_json::json!("28800.00"),       // low
+            serde_json::json!("29200.00"),       // close
+            serde_json::json!("100.50"),         // volume
+            serde_json::json!(1609462799999i64), // close_time
+            serde_json::json!("2920000.00"),     // quote_volume
+            serde_json::json!(5000u64),          // trades
+            serde_json::json!("60.30"),          // taker_buy_volume
+            serde_json::json!("1752000.00"),     // taker_buy_quote_volume (unused)
+            serde_json::json!("0"),              // ignore
         ];
 
         let candle = parse_kline(&raw).unwrap();
@@ -227,10 +233,16 @@ mod tests {
         assert_eq!(candle.close, Decimal::from_str("29200.00").unwrap());
         assert_eq!(candle.volume, Decimal::from_str("100.50").unwrap());
         assert_eq!(candle.close_time, 1609462799999);
-        assert_eq!(candle.quote_volume, Decimal::from_str("2920000.00").unwrap());
+        assert_eq!(
+            candle.quote_volume,
+            Decimal::from_str("2920000.00").unwrap()
+        );
         assert_eq!(candle.trades, 5000);
         assert_eq!(candle.taker_buy_volume, Decimal::from_str("60.30").unwrap());
-        assert_eq!(candle.taker_sell_volume, Decimal::from_str("40.20").unwrap());
+        assert_eq!(
+            candle.taker_sell_volume,
+            Decimal::from_str("40.20").unwrap()
+        );
     }
 
     #[test]

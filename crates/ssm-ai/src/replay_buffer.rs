@@ -338,7 +338,10 @@ mod tests {
             .iter()
             .zip(b.iter())
             .any(|(x, y)| (x.reward - y.reward).abs() > f64::EPSILON);
-        assert!(any_different, "different seeds should produce different samples");
+        assert!(
+            any_different,
+            "different seeds should produce different samples"
+        );
     }
 
     #[test]

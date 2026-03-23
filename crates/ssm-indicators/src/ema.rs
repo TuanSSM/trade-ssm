@@ -140,11 +140,7 @@ mod tests {
 
     #[test]
     fn test_sma_single_period() {
-        let candles = vec![
-            candle_close("10"),
-            candle_close("20"),
-            candle_close("30"),
-        ];
+        let candles = vec![candle_close("10"), candle_close("20"), candle_close("30")];
         let result = sma(&candles, 1);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], Decimal::from(10));
@@ -154,11 +150,7 @@ mod tests {
 
     #[test]
     fn test_sma_period_equals_len() {
-        let candles = vec![
-            candle_close("10"),
-            candle_close("20"),
-            candle_close("30"),
-        ];
+        let candles = vec![candle_close("10"), candle_close("20"), candle_close("30")];
         let result = sma(&candles, 3);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], Decimal::from(20)); // (10+20+30)/3

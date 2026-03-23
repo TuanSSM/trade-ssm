@@ -220,9 +220,18 @@ mod tests {
     fn bucket_with_fractional_tick_size() {
         // tick_size = 0.5
         let builder = FootprintBuilder::new(Decimal::from_str("0.5").unwrap(), 0, 0);
-        assert_eq!(builder.bucket(Decimal::from_str("100.3").unwrap()), Decimal::from_str("100.0").unwrap());
-        assert_eq!(builder.bucket(Decimal::from_str("100.5").unwrap()), Decimal::from_str("100.5").unwrap());
-        assert_eq!(builder.bucket(Decimal::from_str("100.9").unwrap()), Decimal::from_str("100.5").unwrap());
+        assert_eq!(
+            builder.bucket(Decimal::from_str("100.3").unwrap()),
+            Decimal::from_str("100.0").unwrap()
+        );
+        assert_eq!(
+            builder.bucket(Decimal::from_str("100.5").unwrap()),
+            Decimal::from_str("100.5").unwrap()
+        );
+        assert_eq!(
+            builder.bucket(Decimal::from_str("100.9").unwrap()),
+            Decimal::from_str("100.5").unwrap()
+        );
     }
 
     #[test]
@@ -278,9 +287,18 @@ mod tests {
         // tick_size = 0.01
         let ts = Decimal::from_str("0.01").unwrap();
         let builder = FootprintBuilder::new(ts, 0, 0);
-        assert_eq!(builder.bucket(Decimal::from_str("100.456").unwrap()), Decimal::from_str("100.45").unwrap());
-        assert_eq!(builder.bucket(Decimal::from_str("100.001").unwrap()), Decimal::from_str("100.00").unwrap());
-        assert_eq!(builder.bucket(Decimal::from_str("100.999").unwrap()), Decimal::from_str("100.99").unwrap());
+        assert_eq!(
+            builder.bucket(Decimal::from_str("100.456").unwrap()),
+            Decimal::from_str("100.45").unwrap()
+        );
+        assert_eq!(
+            builder.bucket(Decimal::from_str("100.001").unwrap()),
+            Decimal::from_str("100.00").unwrap()
+        );
+        assert_eq!(
+            builder.bucket(Decimal::from_str("100.999").unwrap()),
+            Decimal::from_str("100.99").unwrap()
+        );
     }
 
     #[test]

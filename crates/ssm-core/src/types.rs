@@ -394,10 +394,7 @@ mod tests {
             OrderType::TakeProfitMarket.to_string(),
             "TAKE_PROFIT_MARKET"
         );
-        assert_eq!(
-            OrderType::TakeProfitLimit.to_string(),
-            "TAKE_PROFIT_LIMIT"
-        );
+        assert_eq!(OrderType::TakeProfitLimit.to_string(), "TAKE_PROFIT_LIMIT");
         assert_eq!(OrderType::TrailingStop.to_string(), "TRAILING_STOP");
     }
 
@@ -536,10 +533,7 @@ mod tests {
         assert_eq!(restored.side, Side::Sell);
         assert_eq!(restored.order_type, OrderType::StopLimit);
         assert_eq!(restored.quantity, Decimal::from_str("0.5").unwrap());
-        assert_eq!(
-            restored.price,
-            Some(Decimal::from_str("41000.00").unwrap())
-        );
+        assert_eq!(restored.price, Some(Decimal::from_str("41000.00").unwrap()));
         assert_eq!(
             restored.stop_price,
             Some(Decimal::from_str("41500.00").unwrap())
@@ -579,10 +573,7 @@ mod tests {
             restored.unrealized_pnl,
             Decimal::from_str("150.00").unwrap()
         );
-        assert_eq!(
-            restored.realized_pnl,
-            Decimal::from_str("0.00").unwrap()
-        );
+        assert_eq!(restored.realized_pnl, Decimal::from_str("0.00").unwrap());
         assert_eq!(restored.leverage, 10);
         assert_eq!(restored.opened_at, 1_700_000_000_000);
     }
@@ -591,7 +582,7 @@ mod tests {
     fn test_feature_row_serde() {
         let row = FeatureRow {
             timestamp: 1_700_000_000_000,
-            features: vec![0.5, -1.2, 3.14, 0.0, 99.9],
+            features: vec![0.5, -1.2, 3.15, 0.0, 99.9],
             label: Some(1.0),
         };
 
@@ -599,7 +590,7 @@ mod tests {
         let restored: FeatureRow = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.timestamp, row.timestamp);
-        assert_eq!(restored.features, vec![0.5, -1.2, 3.14, 0.0, 99.9]);
+        assert_eq!(restored.features, vec![0.5, -1.2, 3.15, 0.0, 99.9]);
         assert_eq!(restored.label, Some(1.0));
     }
 
@@ -677,7 +668,7 @@ mod tests {
     fn test_side_clone_copy() {
         let a = Side::Buy;
         let b = a; // Copy
-        let c = a.clone(); // Clone
+        let c = a; // Copy
         assert_eq!(a, b);
         assert_eq!(a, c);
         assert_eq!(b, c);
@@ -940,7 +931,10 @@ mod tests {
     #[test]
     fn test_order_status_debug() {
         assert_eq!(format!("{:?}", OrderStatus::Pending), "Pending");
-        assert_eq!(format!("{:?}", OrderStatus::PartiallyFilled), "PartiallyFilled");
+        assert_eq!(
+            format!("{:?}", OrderStatus::PartiallyFilled),
+            "PartiallyFilled"
+        );
         assert_eq!(format!("{:?}", OrderStatus::Expired), "Expired");
     }
 
@@ -948,7 +942,7 @@ mod tests {
     fn test_order_status_clone_copy() {
         let s = OrderStatus::Filled;
         let s2 = s; // Copy
-        let s3 = s.clone(); // Clone
+        let s3 = s; // Copy
         assert_eq!(s, s2);
         assert_eq!(s, s3);
     }
@@ -972,10 +966,7 @@ mod tests {
         let cloned = pos.clone();
         assert_eq!(cloned.side, Side::Sell);
         assert_eq!(cloned.leverage, 20);
-        assert_eq!(
-            cloned.unrealized_pnl,
-            Decimal::from_str("-50.00").unwrap()
-        );
+        assert_eq!(cloned.unrealized_pnl, Decimal::from_str("-50.00").unwrap());
     }
 
     #[test]
@@ -996,10 +987,7 @@ mod tests {
             restored.unrealized_pnl,
             Decimal::from_str("-200.50").unwrap()
         );
-        assert_eq!(
-            restored.realized_pnl,
-            Decimal::from_str("100.25").unwrap()
-        );
+        assert_eq!(restored.realized_pnl, Decimal::from_str("100.25").unwrap());
     }
 
     #[test]
@@ -1032,7 +1020,7 @@ mod tests {
         use std::collections::HashSet;
         let a = AIAction::EnterLong;
         let b = a; // Copy
-        let c = a.clone(); // Clone
+        let c = a; // Copy
         assert_eq!(a, b);
         assert_eq!(a, c);
 
@@ -1118,7 +1106,7 @@ mod tests {
         let tier = LiquidationTier::Large;
         let debug = format!("{:?}", tier);
         assert_eq!(debug, "Large");
-        let cloned = tier.clone();
+        let cloned = tier;
         assert_eq!(tier, cloned);
     }
 
@@ -1236,7 +1224,7 @@ mod tests {
         assert_eq!(format!("{:?}", ExecutionMode::Live), "Live");
 
         let mode2 = mode; // Copy
-        let mode3 = mode.clone(); // Clone
+        let mode3 = mode; // Copy
         assert_eq!(mode, mode2);
         assert_eq!(mode, mode3);
     }
@@ -1261,7 +1249,7 @@ mod tests {
         let tif = TimeInForce::Fok;
         assert_eq!(format!("{:?}", tif), "Fok");
         let tif2 = tif; // Copy
-        let tif3 = tif.clone(); // Clone
+        let tif3 = tif; // Copy
         assert_eq!(tif, tif2);
         assert_eq!(tif, tif3);
     }
@@ -1310,7 +1298,8 @@ mod tests {
     #[test]
     fn test_liquidation_serde_with_renamed_field() {
         // Test that origQty is properly deserialized via serde rename
-        let json = r#"{"symbol":"BTCUSDT","side":"BUY","price":"50000","origQty":"2.0","time":100}"#;
+        let json =
+            r#"{"symbol":"BTCUSDT","side":"BUY","price":"50000","origQty":"2.0","time":100}"#;
         let liq: Liquidation = serde_json::from_str(json).unwrap();
         assert_eq!(liq.quantity, Decimal::from(2));
 
@@ -1387,7 +1376,11 @@ mod tests {
 
     #[test]
     fn test_order_rejected_and_cancelled_statuses() {
-        for status in &[OrderStatus::Cancelled, OrderStatus::Rejected, OrderStatus::Expired] {
+        for status in &[
+            OrderStatus::Cancelled,
+            OrderStatus::Rejected,
+            OrderStatus::Expired,
+        ] {
             let order = Order {
                 id: "ord-terminal".to_string(),
                 symbol: "BTCUSDT".to_string(),

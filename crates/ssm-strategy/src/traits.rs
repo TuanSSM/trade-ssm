@@ -126,20 +126,25 @@ mod tests {
     fn multiple_strategies_as_trait_objects() {
         struct StratA;
         impl Strategy for StratA {
-            fn name(&self) -> &str { "a" }
-            fn analyze(&self, _candles: &[Candle]) -> Result<Option<Signal>> { Ok(None) }
+            fn name(&self) -> &str {
+                "a"
+            }
+            fn analyze(&self, _candles: &[Candle]) -> Result<Option<Signal>> {
+                Ok(None)
+            }
         }
         struct StratB;
         impl Strategy for StratB {
-            fn name(&self) -> &str { "b" }
-            fn analyze(&self, _candles: &[Candle]) -> Result<Option<Signal>> { Ok(None) }
+            fn name(&self) -> &str {
+                "b"
+            }
+            fn analyze(&self, _candles: &[Candle]) -> Result<Option<Signal>> {
+                Ok(None)
+            }
         }
 
-        let strategies: Vec<Box<dyn Strategy>> = vec![
-            Box::new(DummyStrategy),
-            Box::new(StratA),
-            Box::new(StratB),
-        ];
+        let strategies: Vec<Box<dyn Strategy>> =
+            vec![Box::new(DummyStrategy), Box::new(StratA), Box::new(StratB)];
         assert_eq!(strategies[0].name(), "dummy");
         assert_eq!(strategies[1].name(), "a");
         assert_eq!(strategies[2].name(), "b");

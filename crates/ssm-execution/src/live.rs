@@ -373,7 +373,8 @@ mod tests {
     #[test]
     fn test_sign_special_characters() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig = engine.sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890");
+        let sig =
+            engine.sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890");
         assert_eq!(sig.len(), 64);
         assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
     }

@@ -314,7 +314,10 @@ mod tests {
         let zones = detect_imbalances(&candles, &config);
         assert_eq!(zones.len(), 3);
         let stacks = detect_stacked_imbalances(&zones, 2);
-        assert!(stacks.is_empty(), "alternating types should not form stacks");
+        assert!(
+            stacks.is_empty(),
+            "alternating types should not form stacks"
+        );
     }
 
     #[test]
@@ -354,7 +357,10 @@ mod tests {
             stacked_threshold: 1,
         };
         let zones = detect_imbalances(&candles, &config);
-        assert!(zones.is_empty(), "balanced volumes should produce no imbalances");
+        assert!(
+            zones.is_empty(),
+            "balanced volumes should produce no imbalances"
+        );
     }
 
     #[test]
@@ -419,20 +425,23 @@ mod tests {
         let zones = detect_imbalances(&candles, &config);
         assert_eq!(zones.len(), 2);
         let stacks = detect_stacked_imbalances(&zones, 3);
-        assert!(stacks.is_empty(), "2 zones should not form stack with min_stack=3");
+        assert!(
+            stacks.is_empty(),
+            "2 zones should not form stack with min_stack=3"
+        );
     }
 
     #[test]
     fn two_separate_stacks() {
         // Buy stack (0,1,2), then a gap (3 = balanced), then sell stack (4,5,6)
         let candles = vec![
-            candle_vol("90", "10"),  // 0: buy
-            candle_vol("90", "10"),  // 1: buy
-            candle_vol("90", "10"),  // 2: buy
-            candle_vol("50", "50"),  // 3: balanced (no imbalance)
-            candle_vol("10", "90"),  // 4: sell
-            candle_vol("10", "90"),  // 5: sell
-            candle_vol("10", "90"),  // 6: sell
+            candle_vol("90", "10"), // 0: buy
+            candle_vol("90", "10"), // 1: buy
+            candle_vol("90", "10"), // 2: buy
+            candle_vol("50", "50"), // 3: balanced (no imbalance)
+            candle_vol("10", "90"), // 4: sell
+            candle_vol("10", "90"), // 5: sell
+            candle_vol("10", "90"), // 6: sell
         ];
         let config = ImbalanceConfig {
             min_ratio: Decimal::from(3),
@@ -480,11 +489,11 @@ mod tests {
     fn many_candles_mixed_imbalances() {
         // Test with many candles, some with buy imbalance, some sell, some balanced
         let candles = vec![
-            candle_vol("80", "20"),  // buy ratio 4
-            candle_vol("50", "50"),  // balanced
-            candle_vol("20", "80"),  // sell ratio 4
-            candle_vol("50", "50"),  // balanced
-            candle_vol("90", "10"),  // buy ratio 9
+            candle_vol("80", "20"), // buy ratio 4
+            candle_vol("50", "50"), // balanced
+            candle_vol("20", "80"), // sell ratio 4
+            candle_vol("50", "50"), // balanced
+            candle_vol("90", "10"), // buy ratio 9
         ];
         let config = ImbalanceConfig {
             min_ratio: Decimal::from(3),

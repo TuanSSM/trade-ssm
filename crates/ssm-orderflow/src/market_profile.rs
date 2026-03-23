@@ -243,7 +243,11 @@ mod tests {
         assert!(!profile.levels.is_empty());
         // Volume may have tiny rounding due to distribution across levels
         let diff = (profile.total_volume - Decimal::from(50)).abs();
-        assert!(diff < Decimal::new(1, 10), "total_volume should be ~50, got {}", profile.total_volume);
+        assert!(
+            diff < Decimal::new(1, 10),
+            "total_volume should be ~50, got {}",
+            profile.total_volume
+        );
         // POC must be within the candle's range
         assert!(profile.poc >= Decimal::from(100));
         assert!(profile.poc <= Decimal::from(105));
@@ -258,7 +262,12 @@ mod tests {
             candle_range("100", "120", "150"),
         ];
         let profile = build_profile(&candles, Decimal::from(5));
-        assert!(profile.vah >= profile.val, "VAH ({}) must be >= VAL ({})", profile.vah, profile.val);
+        assert!(
+            profile.vah >= profile.val,
+            "VAH ({}) must be >= VAL ({})",
+            profile.vah,
+            profile.val
+        );
     }
 
     #[test]
@@ -351,9 +360,16 @@ mod tests {
             candle_range("99", "100", "20"),
         ];
         let profile = build_profile(&candles, Decimal::from(1));
-        let level_100 = profile.levels.iter().find(|l| l.price == Decimal::from(100));
+        let level_100 = profile
+            .levels
+            .iter()
+            .find(|l| l.price == Decimal::from(100));
         assert!(level_100.is_some(), "level 100 should exist");
-        assert_eq!(level_100.unwrap().tpo_count, 2, "two candles touch level 100");
+        assert_eq!(
+            level_100.unwrap().tpo_count,
+            2,
+            "two candles touch level 100"
+        );
     }
 
     #[test]
@@ -396,7 +412,7 @@ mod tests {
         // POC should be at the high-volume level, VA should be narrow
         let candles = vec![
             candle_range("100", "100", "1000"), // huge volume at 100
-            candle_range("90", "110", "10"),     // spread thinly
+            candle_range("90", "110", "10"),    // spread thinly
         ];
         let profile = build_profile(&candles, Decimal::from(1));
         assert_eq!(profile.poc, Decimal::from(100));
@@ -422,7 +438,11 @@ mod tests {
             .iter()
             .filter(|l| l.price >= profile.val && l.price <= profile.vah)
             .count();
-        assert!(va_levels >= 7, "VA should cover at least 7 of 10 uniform levels, got {}", va_levels);
+        assert!(
+            va_levels >= 7,
+            "VA should cover at least 7 of 10 uniform levels, got {}",
+            va_levels
+        );
     }
 
     #[test]

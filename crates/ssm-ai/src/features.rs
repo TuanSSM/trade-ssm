@@ -359,10 +359,7 @@ mod tests {
 
     #[test]
     fn label_features_with_horizon_beyond_data() {
-        let candles = vec![
-            candle_at("100", "50", "50"),
-            candle_at("110", "50", "50"),
-        ];
+        let candles = vec![candle_at("100", "50", "50"), candle_at("110", "50", "50")];
         let mut features = extract_features(&candles, 2);
         label_features(&mut features, &candles, 10);
         for f in &features {
