@@ -66,14 +66,14 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release
-        run: cargo build --release --bin analyzer --bin download-data --bin backtest --target ${{ matrix.target }}
+        run: cargo build --release --bin analyzer --bin download-data --bin backtest --bin rl-backtest --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package binaries
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/{analyzer,download-data,backtest} dist/ 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/{analyzer,download-data,backtest,rl-backtest} dist/ 2>/dev/null || true
           tar czf trade-ssm-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C dist .
 
       - name: Upload artifact
