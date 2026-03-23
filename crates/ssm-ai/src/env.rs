@@ -18,6 +18,7 @@ pub struct TradingEnv {
     reward_config: RewardConfig,
     balance: f64,
     metrics: MetricsAccumulator,
+    equity_peak: f64,
 }
 
 struct EnvPosition {
@@ -64,6 +65,7 @@ impl TradingEnv {
             trade_count: 0,
             metrics: MetricsAccumulator::new(balance, first_price),
             balance,
+            equity_peak: balance,
             config,
             reward_config,
         }
@@ -75,6 +77,7 @@ impl TradingEnv {
         self.total_reward = 0.0;
         self.trade_count = 0;
         self.balance = self.config.initial_balance;
+        self.equity_peak = self.balance;
         let first_price = self
             .candles
             .first()
@@ -144,10 +147,21 @@ impl TradingEnv {
             }
         }
 
+        // Apply drawdown penalty
+        let equity = self.compute_equity();
+        if equity > self.equity_peak {
+            self.equity_peak = equity;
+        }
+        if self.reward_config.drawdown_penalty_rate > 0.0 && self.equity_peak > 0.0 {
+            let drawdown = (self.equity_peak - equity) / self.equity_peak;
+            if drawdown > 0.0 {
+                reward -= drawdown * self.reward_config.drawdown_penalty_rate;
+            }
+        }
+
         self.total_reward += reward;
         self.step += 1;
 
-        let equity = self.compute_equity();
         let obs_price = self.current_price();
         self.metrics.record_step(equity, obs_price);
 
@@ -303,11 +317,9 @@ mod tests {
         let mut env = TradingEnv::new(candles);
         env.reset();
 
-        // Enter long at 100
         let (obs, _) = env.step(AIAction::EnterLong);
         assert!(obs.position_side.is_some());
 
-        // Exit at 110 → 10% profit
         let (_, reward) = env.step(AIAction::ExitLong);
         assert!(reward > 0.0, "expected profit, got {reward}");
         assert_eq!(env.trade_count(), 1);
@@ -330,7 +342,6 @@ mod tests {
         let mut env = TradingEnv::new(candles);
         env.reset();
 
-        // Exit long with no position
         let (_, reward) = env.step(AIAction::ExitLong);
         assert!(reward < 0.0);
     }
@@ -374,7 +385,6 @@ mod tests {
 
         env.step(AIAction::EnterLong);
         let (_, reward) = env.step(AIAction::ExitLong);
-        // 10% profit minus fee penalty (2 * 0.001 = 0.002)
         assert!(reward > 0.0);
         assert!(
             reward < 0.1,
@@ -399,8 +409,6 @@ mod tests {
         env.step(AIAction::EnterLong);
         let (_, reward_with_slippage) = env.step(AIAction::ExitLong);
 
-        // Without slippage: 10%. With slippage: entry at 101, exit at ~108.9
-        // Should be less than 10%
         assert!(reward_with_slippage < 0.1);
         assert!(reward_with_slippage > 0.0);
     }
@@ -420,7 +428,6 @@ mod tests {
 
         env.step(AIAction::EnterLong);
         env.step(AIAction::ExitLong);
-        // Balance should increase with profit
         assert!(env.balance() > initial);
     }
 
@@ -451,6 +458,8 @@ mod tests {
         assert!((obs.balance - 10_000.0).abs() < f64::EPSILON);
     }
 
+    // --- Tests from branch (ours) ---
+
     #[test]
     fn reset_clears_state() {
         let candles = vec![
@@ -465,7 +474,6 @@ mod tests {
         assert!(env.trade_count() > 0);
         assert!(env.total_reward() != 0.0 || env.balance() != 10_000.0);
 
-        // After reset, everything should be clean
         let obs = env.reset();
         assert_eq!(obs.step, 0);
         assert!(obs.position_side.is_none());
@@ -484,7 +492,6 @@ mod tests {
         let mut env = TradingEnv::new(candles);
         env.reset();
         env.step(AIAction::EnterLong);
-        // Second enter while already in position should be penalized
         let (_, reward) = env.step(AIAction::EnterLong);
         assert!(reward < 0.0, "duplicate entry should be penalized");
     }
@@ -499,7 +506,6 @@ mod tests {
         let mut env = TradingEnv::new(candles);
         env.reset();
         env.step(AIAction::EnterLong);
-        // ExitShort while holding long should be penalized
         let (_, reward) = env.step(AIAction::ExitShort);
         assert!(reward < 0.0, "exit wrong side should be penalized");
     }
@@ -516,7 +522,6 @@ mod tests {
         env.reset();
         env.step(AIAction::EnterLong);
 
-        // Step with Neutral until past threshold
         let mut penalty_observed = false;
         for _ in 0..10 {
             let (_, reward) = env.step(AIAction::Neutral);
@@ -536,9 +541,7 @@ mod tests {
         ];
         let mut env = TradingEnv::new(candles);
         env.reset();
-        // Enter long at 100
         let (obs, _) = env.step(AIAction::EnterLong);
-        // Price is now 120, we have unrealized gain
         assert!(obs.equity > obs.balance, "equity should exceed balance with unrealized gain");
         assert!(obs.unrealized_pnl > 0.0);
     }
@@ -547,7 +550,7 @@ mod tests {
     fn short_loss_decreases_balance() {
         let candles = vec![
             candle_price("100"),
-            candle_price("110"), // price goes up = short loses
+            candle_price("110"),
             candle_price("120"),
         ];
         let mut env = TradingEnv::new(candles);
@@ -563,7 +566,6 @@ mod tests {
         let candles: Vec<_> = (0..5).map(|_| candle_price("100")).collect();
         let mut env = TradingEnv::new(candles);
         env.reset();
-        // No position, neutral should always give zero reward
         for _ in 0..4 {
             let (_, reward) = env.step(AIAction::Neutral);
             assert!((reward - 0.0).abs() < f64::EPSILON);
@@ -594,7 +596,6 @@ mod tests {
             candle_price("110"),
             candle_price("120"),
         ];
-        // Without win bonus
         let mut env_no_bonus = TradingEnv::with_config(
             candles.clone(),
             EnvConfig::default(),
@@ -604,7 +605,6 @@ mod tests {
         env_no_bonus.step(AIAction::EnterLong);
         let (_, reward_no) = env_no_bonus.step(AIAction::ExitLong);
 
-        // With win bonus
         let reward_cfg = RewardConfig {
             win_bonus: 1.0,
             ..RewardConfig::default()
@@ -616,5 +616,74 @@ mod tests {
         let (_, reward_yes) = env_bonus.step(AIAction::ExitLong);
 
         assert!(reward_yes > reward_no, "win bonus should increase reward for profitable trade");
+    }
+
+    // --- Tests from main (theirs) ---
+
+    #[test]
+    fn drawdown_penalty_applied_when_equity_drops() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("90"),
+            candle_price("85"),
+        ];
+        let env_cfg = EnvConfig::default();
+        let reward_cfg = RewardConfig {
+            drawdown_penalty_rate: 1.0,
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (_, reward_at_peak) = env.step(AIAction::Neutral);
+        let (_, reward_in_drawdown) = env.step(AIAction::Neutral);
+        assert!(
+            reward_in_drawdown < reward_at_peak,
+            "drawdown penalty should reduce reward: peak_reward={reward_at_peak}, drawdown_reward={reward_in_drawdown}"
+        );
+    }
+
+    #[test]
+    fn no_drawdown_penalty_at_new_highs() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("120"),
+        ];
+        let reward_cfg = RewardConfig {
+            drawdown_penalty_rate: 1.0,
+            hold_penalty_threshold: 1000,
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, EnvConfig::default(), reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (_, reward) = env.step(AIAction::Neutral);
+        assert!(
+            (reward - 0.0).abs() < f64::EPSILON,
+            "no drawdown penalty at new highs, got {reward}"
+        );
+    }
+
+    #[test]
+    fn drawdown_penalty_zero_rate_has_no_effect() {
+        let candles = vec![candle_price("100"), candle_price("110"), candle_price("80")];
+        let reward_cfg = RewardConfig {
+            drawdown_penalty_rate: 0.0,
+            hold_penalty_threshold: 1000,
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, EnvConfig::default(), reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (_, reward) = env.step(AIAction::Neutral);
+        assert!(
+            (reward - 0.0).abs() < f64::EPSILON,
+            "zero drawdown_penalty_rate should have no effect, got {reward}"
+        );
     }
 }

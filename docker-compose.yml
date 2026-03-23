@@ -46,3 +46,105 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - DATAFILE=${DATAFILE:-}
       - CVD_WINDOW=${CVD_WINDOW:-15}
+
+  # === RL trainer: train model from candle data ===
+  rl-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-rl-trainer
+    command: ["rl-trainer"]
+    profiles: ["rl"]
+    volumes:
+      - ./models:/app/models
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - SYMBOL=${SYMBOL:-BTCUSDT}
+      - INTERVAL=${INTERVAL:-15m}
+      - MODEL_DIR=/app/models
+      - LEARNING_RATE=${LEARNING_RATE:-0.01}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on:
+      - nats
+      - data-feed
+
+  # === RL backtest: evaluate model on historical data ===
+  rl-backtest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-rl-backtest
+    command: ["rl-backtest"]
+    profiles: ["rl"]
+    volumes:
+      - ./user_data:/app/user_data
+      - ./models:/app/models
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - DATAFILE=${DATAFILE:-}
+      - RL_MODE=${RL_MODE:-single}
+      - RL_TIMEFRAME=${RL_TIMEFRAME:-15m}
+      - MODEL_PATH=${MODEL_PATH:-}
+
+  # === Data feed: WebSocket -> NATS ===
+  data-feed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-data-feed
+    command: ["data-feed"]
+    profiles: ["rl", "deploy"]
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - SYMBOL=${SYMBOL:-BTCUSDT}
+      - INTERVAL=${INTERVAL:-15m}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on:
+      - nats
+
+  # === Signal service: strategy -> signals ===
+  signal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-signal
+    command: ["signal-service"]
+    profiles: ["deploy"]
+    volumes:
+      - ./models:/app/models
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - SYMBOL=${SYMBOL:-BTCUSDT}
+      - INTERVAL=${INTERVAL:-15m}
+      - STRATEGY_MODE=${STRATEGY_MODE:-cvd}
+      - MODEL_PATH=${MODEL_PATH:-/app/models/table_model_best.json}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on:
+      - nats
+      - data-feed
+
+  # === Execution service: signals -> orders ===
+  execution:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-execution
+    command: ["execution-service"]
+    profiles: ["deploy"]
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - SYMBOL=${SYMBOL:-BTCUSDT}
+      - EXECUTION_MODE=${EXECUTION_MODE:-paper}
+      - TRADE_QUANTITY=${TRADE_QUANTITY:-0.001}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+    depends_on:
+      - nats
+      - signal
+
+  # === NATS message broker ===
+  nats:
+    image: nats:2-alpine
+    container_name: trade-ssm-nats
+    profiles: ["rl", "deploy"]
+    ports:
+      - "4222:4222"

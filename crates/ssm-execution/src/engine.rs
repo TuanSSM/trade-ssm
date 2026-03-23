@@ -30,6 +30,10 @@ impl ExecutionEngine {
         &self.positions
     }
 
+    pub fn positions_mut(&mut self) -> &mut PositionTracker {
+        &mut self.positions
+    }
+
     /// Submit an order derived from a Signal.
     pub fn submit_signal(
         &mut self,
