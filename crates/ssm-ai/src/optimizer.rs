@@ -404,10 +404,22 @@ mod tests {
 
     #[test]
     fn objective_parse_all_variants() {
-        assert!(matches!(Objective::parse("TotalReturn"), Some(Objective::TotalReturn)));
-        assert!(matches!(Objective::parse("SharpeRatio"), Some(Objective::SharpeRatio)));
-        assert!(matches!(Objective::parse("ProfitFactor"), Some(Objective::ProfitFactor)));
-        assert!(matches!(Objective::parse("WinRate"), Some(Objective::WinRate)));
+        assert!(matches!(
+            Objective::parse("TotalReturn"),
+            Some(Objective::TotalReturn)
+        ));
+        assert!(matches!(
+            Objective::parse("SharpeRatio"),
+            Some(Objective::SharpeRatio)
+        ));
+        assert!(matches!(
+            Objective::parse("ProfitFactor"),
+            Some(Objective::ProfitFactor)
+        ));
+        assert!(matches!(
+            Objective::parse("WinRate"),
+            Some(Objective::WinRate)
+        ));
         assert!(Objective::parse("Invalid").is_none());
         assert!(Objective::parse("").is_none());
     }
@@ -454,7 +466,10 @@ mod tests {
         assert_eq!(results.len(), 100);
         for r in &results {
             let val = r["fee_rate"];
-            assert!(val >= 0.0 && val <= 1.0, "value {val} out of range [0, 1]");
+            assert!(
+                (0.0..=1.0).contains(&val),
+                "value {val} out of range [0, 1]"
+            );
         }
     }
 

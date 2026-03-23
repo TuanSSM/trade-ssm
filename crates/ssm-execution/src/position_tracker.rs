@@ -338,7 +338,12 @@ mod tests {
         tracker.apply_fill(&buy, Decimal::from(50000));
         assert!(tracker.has_position("BTCUSDT"));
 
-        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(1), Decimal::from(51000));
+        let sell = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(1),
+            Decimal::from(51000),
+        );
         tracker.apply_fill(&sell, Decimal::from(51000));
         assert!(!tracker.has_position("BTCUSDT"));
     }
@@ -372,7 +377,12 @@ mod tests {
         assert_eq!(tracker.get("BTCUSDT").unwrap().side, Side::Buy);
 
         // Sell 5 — close long 3, open short 2
-        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(5), Decimal::from(52000));
+        let sell = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(5),
+            Decimal::from(52000),
+        );
         tracker.apply_fill(&sell, Decimal::from(52000));
 
         let pos = tracker.get("BTCUSDT").unwrap();
@@ -386,7 +396,12 @@ mod tests {
         let mut tracker = PositionTracker::new();
 
         // Open short 2
-        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(2), Decimal::from(50000));
+        let sell = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(2),
+            Decimal::from(50000),
+        );
         tracker.apply_fill(&sell, Decimal::from(50000));
         assert_eq!(tracker.get("BTCUSDT").unwrap().side, Side::Sell);
 
@@ -409,7 +424,12 @@ mod tests {
         tracker.apply_fill(&buy, Decimal::from(50000));
 
         // Sell 3 at 52000 — close long 2 (profit 4000), open short 1
-        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(3), Decimal::from(52000));
+        let sell = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(3),
+            Decimal::from(52000),
+        );
         tracker.apply_fill(&sell, Decimal::from(52000));
 
         let pos = tracker.get("BTCUSDT").unwrap();
@@ -421,11 +441,21 @@ mod tests {
     fn test_partial_fill_reduces_quantity() {
         let mut tracker = PositionTracker::new();
 
-        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(10), Decimal::from(50000));
+        let buy = fill_order(
+            "BTCUSDT",
+            Side::Buy,
+            Decimal::from(10),
+            Decimal::from(50000),
+        );
         tracker.apply_fill(&buy, Decimal::from(50000));
 
         // Close 3 of 10
-        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(3), Decimal::from(51000));
+        let sell = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(3),
+            Decimal::from(51000),
+        );
         tracker.apply_fill(&sell, Decimal::from(51000));
 
         let pos = tracker.get("BTCUSDT").unwrap();
@@ -439,15 +469,30 @@ mod tests {
     fn test_multiple_partial_fills() {
         let mut tracker = PositionTracker::new();
 
-        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(10), Decimal::from(50000));
+        let buy = fill_order(
+            "BTCUSDT",
+            Side::Buy,
+            Decimal::from(10),
+            Decimal::from(50000),
+        );
         tracker.apply_fill(&buy, Decimal::from(50000));
 
         // Close 3
-        let sell1 = fill_order("BTCUSDT", Side::Sell, Decimal::from(3), Decimal::from(51000));
+        let sell1 = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(3),
+            Decimal::from(51000),
+        );
         tracker.apply_fill(&sell1, Decimal::from(51000));
 
         // Close 4
-        let sell2 = fill_order("BTCUSDT", Side::Sell, Decimal::from(4), Decimal::from(52000));
+        let sell2 = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(4),
+            Decimal::from(52000),
+        );
         tracker.apply_fill(&sell2, Decimal::from(52000));
 
         let pos = tracker.get("BTCUSDT").unwrap();
@@ -491,7 +536,12 @@ mod tests {
         let btc = fill_order("BTCUSDT", Side::Buy, Decimal::from(1), Decimal::from(50000));
         tracker.apply_fill(&btc, Decimal::from(50000));
 
-        let eth = fill_order("ETHUSDT", Side::Sell, Decimal::from(10), Decimal::from(3000));
+        let eth = fill_order(
+            "ETHUSDT",
+            Side::Sell,
+            Decimal::from(10),
+            Decimal::from(3000),
+        );
         tracker.apply_fill(&eth, Decimal::from(3000));
 
         let mut prices = HashMap::new();
@@ -561,7 +611,12 @@ mod tests {
         let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(5), Decimal::from(50000));
         tracker.apply_fill(&buy, Decimal::from(50000));
 
-        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(5), Decimal::from(50000));
+        let sell = fill_order(
+            "BTCUSDT",
+            Side::Sell,
+            Decimal::from(5),
+            Decimal::from(50000),
+        );
         tracker.apply_fill(&sell, Decimal::from(50000));
 
         // Position should be completely removed

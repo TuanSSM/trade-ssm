@@ -147,7 +147,7 @@ mod tests {
         // First candle has volume, second has zero volume
         let candles = vec![
             candle_hlcv("110", "90", "100", "1000"), // TP=100, vol=1000
-            candle_hlcv("120", "100", "110", "0"),    // TP=110, vol=0
+            candle_hlcv("120", "100", "110", "0"),   // TP=110, vol=0
         ];
         let result = vwap(&candles);
         assert_eq!(result.vwap.len(), 2);

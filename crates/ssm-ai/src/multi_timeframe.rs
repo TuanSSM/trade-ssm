@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn resample_single_candle() {
         let c = make_candle(0, 179_999, "100", "50");
-        let resampled = resample_candles(&[c.clone()], Timeframe::H1);
+        let resampled = resample_candles(std::slice::from_ref(&c), Timeframe::H1);
         assert_eq!(resampled.len(), 1);
         assert_eq!(resampled[0].open, c.open);
         assert_eq!(resampled[0].close, c.close);

@@ -255,10 +255,10 @@ mod tests {
     fn test_atr_gap_up_true_range() {
         // Test that gaps are captured by true range (not just high-low)
         let candles = vec![
-            candle_ohlc("100", "110", "90", "105"),   // normal
-            candle_ohlc("100", "110", "90", "100"),    // normal
-            candle_ohlc("100", "110", "90", "100"),    // close at 100
-            candle_ohlc("130", "140", "125", "135"),   // gap up: low(125) > prev_close(100)
+            candle_ohlc("100", "110", "90", "105"),  // normal
+            candle_ohlc("100", "110", "90", "100"),  // normal
+            candle_ohlc("100", "110", "90", "100"),  // close at 100
+            candle_ohlc("130", "140", "125", "135"), // gap up: low(125) > prev_close(100)
         ];
         // With period=2, we need > 2 candles
         let result = atr(&candles, 2);

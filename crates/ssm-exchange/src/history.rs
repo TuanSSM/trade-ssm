@@ -174,7 +174,7 @@ mod tests {
         let path = dir.join("all_fields.json");
 
         let candle = sample_candle(5000000);
-        save_candles(&[candle.clone()], &path).unwrap();
+        save_candles(std::slice::from_ref(&candle), &path).unwrap();
 
         let loaded = load_candles(&path).unwrap();
         assert_eq!(loaded.len(), 1);

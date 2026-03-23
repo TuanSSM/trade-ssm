@@ -193,10 +193,7 @@ mod tests {
     #[test]
     fn lookback_of_one_produces_no_divergences() {
         // lookback < 2 should produce no divergences per the guard condition
-        let candles = vec![
-            candle("100", "70", "30"),
-            candle("110", "30", "70"),
-        ];
+        let candles = vec![candle("100", "70", "30"), candle("110", "30", "70")];
         let analysis = analyze_delta(&candles, 1);
         assert!(analysis.divergences.is_empty());
     }
@@ -222,10 +219,7 @@ mod tests {
 
     #[test]
     fn lookback_larger_than_candle_count_produces_no_divergences() {
-        let candles = vec![
-            candle("100", "60", "40"),
-            candle("101", "70", "30"),
-        ];
+        let candles = vec![candle("100", "60", "40"), candle("101", "70", "30")];
         // lookback=5 but only 2 candles: guard `candles.len() >= lookback` fails
         let analysis = analyze_delta(&candles, 5);
         assert_eq!(analysis.candle_deltas.len(), 2);
@@ -269,7 +263,11 @@ mod tests {
         ];
         let analysis = analyze_delta(&candles, 2);
         // Indices 2, 3, 4 are all in the divergence scan window
-        assert!(analysis.divergences.len() >= 2, "expected multiple divergences, got {}", analysis.divergences.len());
+        assert!(
+            analysis.divergences.len() >= 2,
+            "expected multiple divergences, got {}",
+            analysis.divergences.len()
+        );
         for d in &analysis.divergences {
             assert_eq!(d.divergence_type, DivergenceType::Bearish);
         }
@@ -357,16 +355,16 @@ mod tests {
         let analysis = analyze_delta(&candles, 4);
         assert_eq!(analysis.divergences.len(), 1);
         assert_eq!(analysis.divergences[0].index, 4);
-        assert_eq!(analysis.divergences[0].divergence_type, DivergenceType::Bearish);
+        assert_eq!(
+            analysis.divergences[0].divergence_type,
+            DivergenceType::Bearish
+        );
     }
 
     #[test]
     fn exactly_lookback_candles_no_divergence_check() {
         // candles.len() == lookback: loop range is lookback..len which is empty
-        let candles = vec![
-            candle("100", "30", "70"),
-            candle("95", "80", "20"),
-        ];
+        let candles = vec![candle("100", "30", "70"), candle("95", "80", "20")];
         let analysis = analyze_delta(&candles, 2);
         // No divergences because loop doesn't execute when len == lookback
         assert_eq!(analysis.divergences.len(), 0);
@@ -387,7 +385,10 @@ mod tests {
         // i=2: price_change = 95 - 105 = -10, delta_change = -20 - (-80) = 60
         // price down, delta up => bullish divergence
         assert_eq!(analysis.divergences.len(), 1);
-        assert_eq!(analysis.divergences[0].divergence_type, DivergenceType::Bullish);
+        assert_eq!(
+            analysis.divergences[0].divergence_type,
+            DivergenceType::Bullish
+        );
     }
 
     #[test]
@@ -400,7 +401,11 @@ mod tests {
         ];
         let analysis = analyze_delta(&candles, 2);
         for cum in &analysis.cumulative_delta {
-            assert!(*cum < Decimal::ZERO, "cumulative delta should be negative, got {}", cum);
+            assert!(
+                *cum < Decimal::ZERO,
+                "cumulative delta should be negative, got {}",
+                cum
+            );
         }
     }
 }

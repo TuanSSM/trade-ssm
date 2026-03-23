@@ -209,7 +209,7 @@ mod tests {
         let bb = bollinger_bands(&candles, 2, Decimal::from(2));
         assert!(!bb.middle.is_empty());
         assert_eq!(bb.middle.len(), 3); // 4 - 2 + 1 = 3
-        // First middle = (100+110)/2 = 105
+                                        // First middle = (100+110)/2 = 105
         assert_eq!(bb.middle[0], Decimal::from(105));
         // Bands should exist and be ordered
         for i in 0..bb.upper.len() {
@@ -267,9 +267,7 @@ mod tests {
     #[test]
     fn test_bollinger_high_volatility_wider_bands() {
         // High volatility data should produce wider bandwidth than low volatility
-        let low_vol_candles: Vec<_> = (0..10)
-            .map(|_| candle_close("100"))
-            .collect();
+        let low_vol_candles: Vec<_> = (0..10).map(|_| candle_close("100")).collect();
         let high_vol_candles: Vec<_> = (0..10)
             .map(|i| {
                 if i % 2 == 0 {

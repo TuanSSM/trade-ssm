@@ -189,10 +189,7 @@ mod tests {
             .collect();
         let signal_period = 9;
         let result = macd(&candles, 12, 26, signal_period);
-        assert_eq!(
-            result.signal.len(),
-            result.macd.len() - signal_period + 1
-        );
+        assert_eq!(result.signal.len(), result.macd.len() - signal_period + 1);
     }
 
     #[test]
@@ -214,11 +211,7 @@ mod tests {
             assert_eq!(*val, Decimal::ZERO, "MACD should be 0 for constant price");
         }
         for val in &result.signal {
-            assert_eq!(
-                *val,
-                Decimal::ZERO,
-                "Signal should be 0 for constant price"
-            );
+            assert_eq!(*val, Decimal::ZERO, "Signal should be 0 for constant price");
         }
         for val in &result.histogram {
             assert_eq!(
@@ -251,9 +244,8 @@ mod tests {
         let result = macd(&candles, 12, 26, signal_period);
         assert!(!result.signal.is_empty());
         // First signal = average of first 9 MACD values
-        let expected_first_signal: Decimal =
-            result.macd[..signal_period].iter().sum::<Decimal>()
-                / Decimal::from(signal_period as u64);
+        let expected_first_signal: Decimal = result.macd[..signal_period].iter().sum::<Decimal>()
+            / Decimal::from(signal_period as u64);
         assert_eq!(
             result.signal[0], expected_first_signal,
             "First signal should be SMA of first {signal_period} MACD values"

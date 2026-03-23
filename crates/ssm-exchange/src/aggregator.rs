@@ -301,9 +301,9 @@ mod tests {
 
         // Trades within first 5-minute window [0, 300_000)
         agg.ingest(&trade("100", "1", Side::Buy, 0));
-        agg.ingest(&trade("105", "1", Side::Buy, 60_000));  // 1 min in
-        agg.ingest(&trade("95", "1", Side::Sell, 120_000));  // 2 min in
-        agg.ingest(&trade("110", "1", Side::Buy, 240_000));  // 4 min in
+        agg.ingest(&trade("105", "1", Side::Buy, 60_000)); // 1 min in
+        agg.ingest(&trade("95", "1", Side::Sell, 120_000)); // 2 min in
+        agg.ingest(&trade("110", "1", Side::Buy, 240_000)); // 4 min in
 
         // No close yet — still in first 5-minute window
         assert!(agg.closed_candles().is_empty());

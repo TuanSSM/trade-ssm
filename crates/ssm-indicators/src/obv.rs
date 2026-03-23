@@ -117,9 +117,9 @@ mod tests {
     fn test_obv_mixed_trend() {
         let candles = vec![
             candle_cv("100", "1000"),
-            candle_cv("110", "500"),  // up → +500
-            candle_cv("105", "300"),  // down → +500 - 300 = +200
-            candle_cv("115", "800"),  // up → +200 + 800 = +1000
+            candle_cv("110", "500"), // up → +500
+            candle_cv("105", "300"), // down → +500 - 300 = +200
+            candle_cv("115", "800"), // up → +200 + 800 = +1000
         ];
         let result = obv(&candles);
         assert_eq!(result[0], Decimal::ZERO);
@@ -144,10 +144,10 @@ mod tests {
     fn test_obv_alternating_up_down() {
         let candles = vec![
             candle_cv("100", "1000"),
-            candle_cv("110", "500"),  // up: +500
-            candle_cv("100", "500"),  // down: +500 - 500 = 0
-            candle_cv("110", "500"),  // up: 0 + 500 = +500
-            candle_cv("100", "500"),  // down: +500 - 500 = 0
+            candle_cv("110", "500"), // up: +500
+            candle_cv("100", "500"), // down: +500 - 500 = 0
+            candle_cv("110", "500"), // up: 0 + 500 = +500
+            candle_cv("100", "500"), // down: +500 - 500 = 0
         ];
         let result = obv(&candles);
         assert_eq!(result[0], Decimal::ZERO);
@@ -161,8 +161,8 @@ mod tests {
     fn test_obv_zero_volume() {
         let candles = vec![
             candle_cv("100", "0"),
-            candle_cv("110", "0"),  // up but zero volume => +0
-            candle_cv("105", "0"),  // down but zero volume => -0
+            candle_cv("110", "0"), // up but zero volume => +0
+            candle_cv("105", "0"), // down but zero volume => -0
         ];
         let result = obv(&candles);
         assert_eq!(result.len(), 3);
@@ -175,10 +175,10 @@ mod tests {
     fn test_obv_alternating_with_different_volumes() {
         let candles = vec![
             candle_cv("100", "1000"),
-            candle_cv("110", "2000"),  // up: +2000
-            candle_cv("105", "500"),   // down: +2000 - 500 = +1500
-            candle_cv("108", "1000"),  // up: +1500 + 1000 = +2500
-            candle_cv("107", "300"),   // down: +2500 - 300 = +2200
+            candle_cv("110", "2000"), // up: +2000
+            candle_cv("105", "500"),  // down: +2000 - 500 = +1500
+            candle_cv("108", "1000"), // up: +1500 + 1000 = +2500
+            candle_cv("107", "300"),  // down: +2500 - 300 = +2200
         ];
         let result = obv(&candles);
         assert_eq!(result[0], Decimal::ZERO);

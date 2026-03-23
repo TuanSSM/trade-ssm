@@ -205,13 +205,16 @@ mod tests {
     fn test_sub_threshold_liquidations() {
         // All below $1K → no tier counts (classify returns None)
         let liqs = vec![
-            liq("SELL", "100", "0.5"),  // $50
-            liq("BUY", "200", "1.0"),   // $200
+            liq("SELL", "100", "0.5"), // $50
+            liq("BUY", "200", "1.0"),  // $200
         ];
         let s = analyze_liquidations(&liqs);
         for tier in &s.by_tier {
             assert_eq!(tier.long_count, 0, "No long tier counts for sub-threshold");
-            assert_eq!(tier.short_count, 0, "No short tier counts for sub-threshold");
+            assert_eq!(
+                tier.short_count, 0,
+                "No short tier counts for sub-threshold"
+            );
         }
     }
 
@@ -232,10 +235,7 @@ mod tests {
         let s = analyze_liquidations(&liqs);
         assert_eq!(s.total_long_liquidations, 1);
         assert_eq!(s.total_short_liquidations, 0);
-        assert_eq!(
-            s.total_long_value,
-            Decimal::from_str("50000").unwrap()
-        );
+        assert_eq!(s.total_long_value, Decimal::from_str("50000").unwrap());
         assert_eq!(s.total_short_value, Decimal::ZERO);
         // One long with 0 shorts => long_val > short_val * 2 => LongsLiquidated
         assert_eq!(s.bias, LiquidationBias::LongsLiquidated);
@@ -307,10 +307,7 @@ mod tests {
             .collect();
         let s = analyze_liquidations(&liqs);
         assert_eq!(s.total_long_liquidations, 100);
-        assert_eq!(
-            s.total_long_value,
-            Decimal::from_str("5000").unwrap()
-        );
+        assert_eq!(s.total_long_value, Decimal::from_str("5000").unwrap());
         // Each is $50, below Small tier threshold
         for tier in &s.by_tier {
             assert_eq!(tier.long_count, 0);

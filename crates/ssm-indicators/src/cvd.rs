@@ -176,9 +176,9 @@ mod tests {
     #[test]
     fn test_cvd_deltas_correct() {
         let candles = vec![
-            candle("60", "40"),  // delta = 20
-            candle("30", "70"),  // delta = -40
-            candle("55", "45"),  // delta = 10
+            candle("60", "40"), // delta = 20
+            candle("30", "70"), // delta = -40
+            candle("55", "45"), // delta = 10
         ];
         let a = analyze_cvd(&candles, 3);
         assert_eq!(a.deltas[0], Decimal::from(20));
@@ -189,9 +189,9 @@ mod tests {
     #[test]
     fn test_cvd_cumulative_running_sum() {
         let candles = vec![
-            candle("60", "40"),  // delta = 20,  cum = 20
-            candle("30", "70"),  // delta = -40, cum = -20
-            candle("55", "45"),  // delta = 10,  cum = -10
+            candle("60", "40"), // delta = 20,  cum = 20
+            candle("30", "70"), // delta = -40, cum = -20
+            candle("55", "45"), // delta = 10,  cum = -10
         ];
         let a = analyze_cvd(&candles, 3);
         assert_eq!(a.cumulative[0], Decimal::from(20));
