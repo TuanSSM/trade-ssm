@@ -237,4 +237,57 @@ mod tests {
         assert!((returns[1] - 1.99).abs() < 1e-10);
         assert!((returns[0] - (1.0 + 0.99 * 1.99)).abs() < 1e-10);
     }
+
+    #[test]
+    fn empty_vectorized_env() {
+        let venv = VectorizedEnv::new(vec![], EnvConfig::default(), RewardConfig::default());
+        assert!(venv.is_empty());
+        assert_eq!(venv.len(), 0);
+        assert_eq!(venv.num_envs(), 0);
+    }
+
+    #[test]
+    fn total_rewards_and_trade_counts() {
+        let candle_sets = vec![make_candles(20), make_candles(20)];
+        let mut venv =
+            VectorizedEnv::new(candle_sets, EnvConfig::default(), RewardConfig::default());
+        venv.reset_all();
+
+        // Enter long in first env, neutral in second
+        venv.step_all(&[AIAction::EnterLong, AIAction::Neutral]);
+        // Exit long in first env, neutral in second
+        venv.step_all(&[AIAction::ExitLong, AIAction::Neutral]);
+
+        let counts = venv.trade_counts();
+        assert_eq!(counts[0], 1);
+        assert_eq!(counts[1], 0);
+
+        let rewards = venv.total_rewards();
+        assert_eq!(rewards.len(), 2);
+    }
+
+    #[test]
+    fn discounted_returns_empty() {
+        let rollout = Rollout {
+            observations: Vec::new(),
+            actions: Vec::new(),
+            rewards: vec![],
+        };
+        let returns = rollout.compute_returns(0.99);
+        assert!(returns.is_empty());
+    }
+
+    #[test]
+    fn discounted_returns_gamma_zero() {
+        let rollout = Rollout {
+            observations: Vec::new(),
+            actions: Vec::new(),
+            rewards: vec![1.0, 2.0, 3.0],
+        };
+        let returns = rollout.compute_returns(0.0);
+        // With gamma=0, each return equals its immediate reward
+        assert!((returns[0] - 1.0).abs() < 1e-10);
+        assert!((returns[1] - 2.0).abs() < 1e-10);
+        assert!((returns[2] - 3.0).abs() < 1e-10);
+    }
 }
