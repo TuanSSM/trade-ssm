@@ -13,6 +13,10 @@ pub struct EnvConfig {
     pub position_size_pct: f64,
     /// Optional maximum episode length in steps.
     pub max_steps: Option<usize>,
+    /// Enable hedge mode (simultaneous long + short positions).
+    pub hedge_mode: bool,
+    /// Maximum gross exposure as fraction of balance (long + short combined).
+    pub max_gross_exposure: f64,
 }
 
 impl Default for EnvConfig {
@@ -23,6 +27,8 @@ impl Default for EnvConfig {
             initial_balance: 10_000.0,
             position_size_pct: 1.0,
             max_steps: None,
+            hedge_mode: false,
+            max_gross_exposure: 2.0,
         }
     }
 }
@@ -46,6 +52,12 @@ pub struct RewardConfig {
     pub win_bonus: f64,
     /// Penalty proportional to current drawdown (0.0 = none).
     pub drawdown_penalty_rate: f64,
+    /// Per-step penalty rate when gross exposure exceeds threshold (0.0 = off).
+    pub exposure_penalty_rate: f64,
+    /// Gross exposure threshold before penalty applies (1.5 = 150%).
+    pub exposure_penalty_threshold: f64,
+    /// Per-step bonus when both long and short are open (0.0 = off).
+    pub hedge_bonus: f64,
 }
 
 impl Default for RewardConfig {
@@ -59,6 +71,9 @@ impl Default for RewardConfig {
             fee_penalty: false,
             win_bonus: 0.0,
             drawdown_penalty_rate: 0.0,
+            exposure_penalty_rate: 0.0,
+            exposure_penalty_threshold: 1.5,
+            hedge_bonus: 0.0,
         }
     }
 }
@@ -116,6 +131,8 @@ mod tests {
         assert!((cfg.initial_balance - 10_000.0).abs() < f64::EPSILON);
         assert!((cfg.position_size_pct - 1.0).abs() < f64::EPSILON);
         assert!(cfg.max_steps.is_none());
+        assert!(!cfg.hedge_mode);
+        assert!((cfg.max_gross_exposure - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -129,6 +146,9 @@ mod tests {
         assert!(!cfg.fee_penalty);
         assert!((cfg.win_bonus - 0.0).abs() < f64::EPSILON);
         assert!((cfg.drawdown_penalty_rate - 0.0).abs() < f64::EPSILON);
+        assert!((cfg.exposure_penalty_rate - 0.0).abs() < f64::EPSILON);
+        assert!((cfg.exposure_penalty_threshold - 1.5).abs() < f64::EPSILON);
+        assert!((cfg.hedge_bonus - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -152,6 +172,8 @@ mod tests {
             initial_balance: 50_000.0,
             position_size_pct: 0.5,
             max_steps: Some(200),
+            hedge_mode: false,
+            max_gross_exposure: 2.0,
         };
         assert!((cfg.fee_rate - 0.001).abs() < f64::EPSILON);
         assert_eq!(cfg.max_steps, Some(200));
@@ -166,6 +188,8 @@ mod tests {
             initial_balance: 25_000.0,
             position_size_pct: 0.75,
             max_steps: Some(500),
+            hedge_mode: false,
+            max_gross_exposure: 2.0,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: EnvConfig = serde_json::from_str(&json).unwrap();
@@ -219,6 +243,9 @@ mod tests {
             fee_penalty: true,
             win_bonus: 0.5,
             drawdown_penalty_rate: 0.03,
+            exposure_penalty_rate: 0.0,
+            exposure_penalty_threshold: 1.5,
+            hedge_bonus: 0.0,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: RewardConfig = serde_json::from_str(&json).unwrap();
@@ -251,5 +278,33 @@ mod tests {
         assert_eq!(parsed.timeframes.len(), 4);
         assert_eq!(parsed.timeframes[0], "3m");
         assert_eq!(parsed.timeframes[3], "4h");
+    }
+
+    #[test]
+    fn hedge_config_serde_roundtrip() {
+        let cfg = EnvConfig {
+            hedge_mode: true,
+            max_gross_exposure: 1.5,
+            ..EnvConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: EnvConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.hedge_mode);
+        assert!((parsed.max_gross_exposure - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn exposure_reward_config_serde_roundtrip() {
+        let cfg = RewardConfig {
+            exposure_penalty_rate: 0.05,
+            exposure_penalty_threshold: 1.2,
+            hedge_bonus: 0.01,
+            ..RewardConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: RewardConfig = serde_json::from_str(&json).unwrap();
+        assert!((parsed.exposure_penalty_rate - 0.05).abs() < f64::EPSILON);
+        assert!((parsed.exposure_penalty_threshold - 1.2).abs() < f64::EPSILON);
+        assert!((parsed.hedge_bonus - 0.01).abs() < f64::EPSILON);
     }
 }

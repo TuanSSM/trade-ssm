@@ -450,6 +450,14 @@ mod tests {
             done: false,
             balance: 10_000.0,
             equity: 10_000.0,
+            long_position_active: false,
+            long_unrealized_pnl: 0.0,
+            long_hold_duration: 0,
+            short_position_active: false,
+            short_unrealized_pnl: 0.0,
+            short_hold_duration: 0,
+            net_exposure: 0.0,
+            gross_exposure: 0.0,
         };
         assert_eq!(momentum_policy(&obs_no_pos), AIAction::EnterLong);
 
@@ -462,6 +470,14 @@ mod tests {
             done: false,
             balance: 10_000.0,
             equity: 9_500.0,
+            long_position_active: true,
+            long_unrealized_pnl: -0.05,
+            long_hold_duration: 5,
+            short_position_active: false,
+            short_unrealized_pnl: 0.0,
+            short_hold_duration: 0,
+            net_exposure: 1.0,
+            gross_exposure: 1.0,
         };
         assert_eq!(momentum_policy(&obs_long_loss), AIAction::ExitLong);
     }

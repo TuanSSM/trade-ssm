@@ -11,7 +11,8 @@ use crate::metrics::{CompletedTrade, EpisodeMetrics, MetricsAccumulator};
 pub struct TradingEnv {
     candles: Vec<Candle>,
     step: usize,
-    position: Option<EnvPosition>,
+    long_position: Option<EnvPosition>,
+    short_position: Option<EnvPosition>,
     total_reward: f64,
     trade_count: u32,
     config: EnvConfig,
@@ -32,12 +33,26 @@ struct EnvPosition {
 pub struct Observation {
     pub step: usize,
     pub current_price: f64,
+    /// Legacy field: long side if long open, else short side if short open, else None.
     pub position_side: Option<Side>,
+    /// Legacy field: unrealized PnL from primary position (long preferred).
     pub unrealized_pnl: f64,
+    /// Legacy field: hold duration from primary position (long preferred).
     pub hold_duration: usize,
     pub done: bool,
     pub balance: f64,
     pub equity: f64,
+    // Hedge mode observation fields
+    pub long_position_active: bool,
+    pub long_unrealized_pnl: f64,
+    pub long_hold_duration: usize,
+    pub short_position_active: bool,
+    pub short_unrealized_pnl: f64,
+    pub short_hold_duration: usize,
+    /// Long fraction minus short fraction of balance.
+    pub net_exposure: f64,
+    /// Long fraction plus short fraction of balance.
+    pub gross_exposure: f64,
 }
 
 impl TradingEnv {
@@ -60,7 +75,8 @@ impl TradingEnv {
         Self {
             candles,
             step: 0,
-            position: None,
+            long_position: None,
+            short_position: None,
             total_reward: 0.0,
             trade_count: 0,
             metrics: MetricsAccumulator::new(balance, first_price),
@@ -73,7 +89,8 @@ impl TradingEnv {
 
     pub fn reset(&mut self) -> Observation {
         self.step = 0;
-        self.position = None;
+        self.long_position = None;
+        self.short_position = None;
         self.total_reward = 0.0;
         self.trade_count = 0;
         self.balance = self.config.initial_balance;
@@ -106,44 +123,149 @@ impl TradingEnv {
         acc.finalize(steps_per_year)
     }
 
+    /// Helper: check if no position is open on either side.
+    fn is_flat(&self) -> bool {
+        self.long_position.is_none() && self.short_position.is_none()
+    }
+
+    /// Current gross exposure as fraction of balance.
+    fn gross_exposure(&self) -> f64 {
+        let long_frac = if self.long_position.is_some() {
+            self.config.position_size_pct
+        } else {
+            0.0
+        };
+        let short_frac = if self.short_position.is_some() {
+            self.config.position_size_pct
+        } else {
+            0.0
+        };
+        long_frac + short_frac
+    }
+
     /// Take an action, advance one candle, return (observation, reward).
     pub fn step(&mut self, action: AIAction) -> (Observation, f64) {
         let price = self.current_price();
         let mut reward = 0.0;
 
-        match action {
-            AIAction::EnterLong if self.position.is_none() => {
-                let slipped = price * (1.0 + self.config.slippage_rate);
-                self.position = Some(EnvPosition {
-                    side: Side::Buy,
-                    entry_price: slipped,
-                    entry_step: self.step,
-                });
-            }
-            AIAction::EnterShort if self.position.is_none() => {
-                let slipped = price * (1.0 - self.config.slippage_rate);
-                self.position = Some(EnvPosition {
-                    side: Side::Sell,
-                    entry_price: slipped,
-                    entry_step: self.step,
-                });
-            }
-            AIAction::ExitLong if matches!(&self.position, Some(p) if p.side == Side::Buy) => {
-                reward = self.close_position(price);
-            }
-            AIAction::ExitShort if matches!(&self.position, Some(p) if p.side == Side::Sell) => {
-                reward = self.close_position(price);
-            }
-            AIAction::Neutral => {
-                if let Some(pos) = &self.position {
-                    let duration = self.step - pos.entry_step;
-                    if duration > self.reward_config.hold_penalty_threshold {
-                        reward = -self.reward_config.hold_penalty_rate * duration as f64;
+        if self.config.hedge_mode {
+            // --- Hedge mode: long and short are independent ---
+            match action {
+                AIAction::EnterLong if self.long_position.is_none() => {
+                    let new_gross = self.gross_exposure() + self.config.position_size_pct;
+                    if new_gross <= self.config.max_gross_exposure {
+                        let slipped = price * (1.0 + self.config.slippage_rate);
+                        self.long_position = Some(EnvPosition {
+                            side: Side::Buy,
+                            entry_price: slipped,
+                            entry_step: self.step,
+                        });
+                    } else {
+                        reward = -self.reward_config.invalid_action_penalty;
                     }
                 }
+                AIAction::EnterShort if self.short_position.is_none() => {
+                    let new_gross = self.gross_exposure() + self.config.position_size_pct;
+                    if new_gross <= self.config.max_gross_exposure {
+                        let slipped = price * (1.0 - self.config.slippage_rate);
+                        self.short_position = Some(EnvPosition {
+                            side: Side::Sell,
+                            entry_price: slipped,
+                            entry_step: self.step,
+                        });
+                    } else {
+                        reward = -self.reward_config.invalid_action_penalty;
+                    }
+                }
+                AIAction::ExitLong if self.long_position.is_some() => {
+                    if let Some(pos) = self.long_position.take() {
+                        reward = self.close_side_position(pos, price);
+                    }
+                }
+                AIAction::ExitShort if self.short_position.is_some() => {
+                    if let Some(pos) = self.short_position.take() {
+                        reward = self.close_side_position(pos, price);
+                    }
+                }
+                AIAction::Neutral => {
+                    // Sum hold penalties from both positions independently
+                    for pos in [&self.long_position, &self.short_position]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let duration = self.step - pos.entry_step;
+                        if duration > self.reward_config.hold_penalty_threshold {
+                            reward -= self.reward_config.hold_penalty_rate * duration as f64;
+                        }
+                    }
+                }
+                _ => {
+                    reward = -self.reward_config.invalid_action_penalty;
+                }
             }
-            _ => {
-                reward = -self.reward_config.invalid_action_penalty;
+
+            // Exposure penalty
+            let gross = self.gross_exposure();
+            if self.reward_config.exposure_penalty_rate > 0.0
+                && gross > self.reward_config.exposure_penalty_threshold
+            {
+                reward -= self.reward_config.exposure_penalty_rate
+                    * (gross - self.reward_config.exposure_penalty_threshold);
+            }
+
+            // Hedge bonus
+            if self.long_position.is_some()
+                && self.short_position.is_some()
+                && self.reward_config.hedge_bonus > 0.0
+            {
+                let long_frac = self.config.position_size_pct;
+                let short_frac = self.config.position_size_pct;
+                reward += self.reward_config.hedge_bonus * long_frac.min(short_frac);
+            }
+        } else {
+            // --- One-way mode: mutual exclusivity preserved ---
+            match action {
+                AIAction::EnterLong if self.is_flat() => {
+                    let slipped = price * (1.0 + self.config.slippage_rate);
+                    self.long_position = Some(EnvPosition {
+                        side: Side::Buy,
+                        entry_price: slipped,
+                        entry_step: self.step,
+                    });
+                }
+                AIAction::EnterShort if self.is_flat() => {
+                    let slipped = price * (1.0 - self.config.slippage_rate);
+                    self.short_position = Some(EnvPosition {
+                        side: Side::Sell,
+                        entry_price: slipped,
+                        entry_step: self.step,
+                    });
+                }
+                AIAction::ExitLong if self.long_position.is_some() => {
+                    if let Some(pos) = self.long_position.take() {
+                        reward = self.close_side_position(pos, price);
+                    }
+                }
+                AIAction::ExitShort if self.short_position.is_some() => {
+                    if let Some(pos) = self.short_position.take() {
+                        reward = self.close_side_position(pos, price);
+                    }
+                }
+                AIAction::Neutral => {
+                    // Check whichever position is open (at most one in one-way mode)
+                    for pos in [&self.long_position, &self.short_position]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let duration = self.step - pos.entry_step;
+                        if duration > self.reward_config.hold_penalty_threshold {
+                            reward = -self.reward_config.hold_penalty_rate * duration as f64;
+                        }
+                    }
+                }
+                _ => {
+                    reward = -self.reward_config.invalid_action_penalty;
+                }
             }
         }
 
@@ -168,66 +290,63 @@ impl TradingEnv {
         (self.observe(), reward)
     }
 
-    fn close_position(&mut self, exit_price: f64) -> f64 {
-        if let Some(pos) = self.position.take() {
-            self.trade_count += 1;
-            let duration = self.step - pos.entry_step;
+    /// Close a specific position (taken by value from `.take()`), update balance/metrics, return reward.
+    fn close_side_position(&mut self, pos: EnvPosition, exit_price: f64) -> f64 {
+        self.trade_count += 1;
+        let duration = self.step - pos.entry_step;
 
-            // Apply slippage to exit
-            let effective_exit = match pos.side {
-                Side::Buy => exit_price * (1.0 - self.config.slippage_rate),
-                Side::Sell => exit_price * (1.0 + self.config.slippage_rate),
-            };
+        // Apply slippage to exit
+        let effective_exit = match pos.side {
+            Side::Buy => exit_price * (1.0 - self.config.slippage_rate),
+            Side::Sell => exit_price * (1.0 + self.config.slippage_rate),
+        };
 
-            // Compute raw PnL percentage
-            let pnl_pct = match pos.side {
-                Side::Buy => (effective_exit - pos.entry_price) / pos.entry_price,
-                Side::Sell => (pos.entry_price - effective_exit) / pos.entry_price,
-            };
+        // Compute raw PnL percentage
+        let pnl_pct = match pos.side {
+            Side::Buy => (effective_exit - pos.entry_price) / pos.entry_price,
+            Side::Sell => (pos.entry_price - effective_exit) / pos.entry_price,
+        };
 
-            // Compute fees on both entry and exit
-            let notional = self.balance * self.config.position_size_pct;
-            let fees = 2.0 * self.config.fee_rate * notional;
-            let pnl_dollar = pnl_pct * notional - fees;
+        // Compute fees on both entry and exit
+        let notional = self.balance * self.config.position_size_pct;
+        let fees = 2.0 * self.config.fee_rate * notional;
+        let pnl_dollar = pnl_pct * notional - fees;
 
-            // Update balance
-            self.balance += pnl_dollar;
-            self.metrics.set_balance(self.balance);
+        // Update balance
+        self.balance += pnl_dollar;
+        self.metrics.set_balance(self.balance);
 
-            // Record trade
-            self.metrics.record_trade(CompletedTrade {
-                side: pos.side,
-                entry_price: pos.entry_price,
-                exit_price: effective_exit,
-                duration,
-                pnl: pnl_dollar,
-                fees,
-            });
+        // Record trade
+        self.metrics.record_trade(CompletedTrade {
+            side: pos.side,
+            entry_price: pos.entry_price,
+            exit_price: effective_exit,
+            duration,
+            pnl: pnl_dollar,
+            fees,
+        });
 
-            // Compute reward
-            let duration_penalty = if duration > self.reward_config.close_penalty_threshold {
-                self.reward_config.close_penalty_rate * duration as f64
-            } else {
-                0.0
-            };
-
-            let fee_penalty = if self.reward_config.fee_penalty {
-                2.0 * self.config.fee_rate
-            } else {
-                0.0
-            };
-
-            let mut reward = pnl_pct - duration_penalty - fee_penalty;
-
-            // Win bonus
-            if pnl_pct > 0.0 && self.reward_config.win_bonus > 0.0 {
-                reward += pnl_pct * self.reward_config.win_bonus;
-            }
-
-            reward
+        // Compute reward
+        let duration_penalty = if duration > self.reward_config.close_penalty_threshold {
+            self.reward_config.close_penalty_rate * duration as f64
         } else {
             0.0
+        };
+
+        let fee_penalty = if self.reward_config.fee_penalty {
+            2.0 * self.config.fee_rate
+        } else {
+            0.0
+        };
+
+        let mut reward = pnl_pct - duration_penalty - fee_penalty;
+
+        // Win bonus
+        if pnl_pct > 0.0 && self.reward_config.win_bonus > 0.0 {
+            reward += pnl_pct * self.reward_config.win_bonus;
         }
+
+        reward
     }
 
     fn current_price(&self) -> f64 {
@@ -237,30 +356,75 @@ impl TradingEnv {
             .unwrap_or(0.0)
     }
 
+    fn unrealized_pnl_for(pos: &EnvPosition, price: f64, notional: f64) -> f64 {
+        let pnl_pct = match pos.side {
+            Side::Buy => (price - pos.entry_price) / pos.entry_price,
+            Side::Sell => (pos.entry_price - price) / pos.entry_price,
+        };
+        pnl_pct * notional
+    }
+
     fn compute_equity(&self) -> f64 {
         let price = self.current_price();
-        if let Some(pos) = &self.position {
-            let notional = self.balance * self.config.position_size_pct;
-            let unrealized_pnl = match pos.side {
-                Side::Buy => (price - pos.entry_price) / pos.entry_price * notional,
-                Side::Sell => (pos.entry_price - price) / pos.entry_price * notional,
-            };
-            self.balance + unrealized_pnl
-        } else {
-            self.balance
+        let notional = self.balance * self.config.position_size_pct;
+        let mut equity = self.balance;
+        if let Some(pos) = &self.long_position {
+            equity += Self::unrealized_pnl_for(pos, price, notional);
+        }
+        if let Some(pos) = &self.short_position {
+            equity += Self::unrealized_pnl_for(pos, price, notional);
+        }
+        equity
+    }
+
+    fn pnl_pct_for(pos: &EnvPosition, price: f64) -> f64 {
+        match pos.side {
+            Side::Buy => (price - pos.entry_price) / pos.entry_price,
+            Side::Sell => (pos.entry_price - price) / pos.entry_price,
         }
     }
 
     fn observe(&self) -> Observation {
         let price = self.current_price();
-        let (side, pnl, duration) = if let Some(pos) = &self.position {
-            let pnl = match pos.side {
-                Side::Buy => (price - pos.entry_price) / pos.entry_price,
-                Side::Sell => (pos.entry_price - price) / pos.entry_price,
-            };
-            (Some(pos.side), pnl, self.step - pos.entry_step)
+
+        // Per-side fields
+        let (long_active, long_pnl, long_dur) = if let Some(pos) = &self.long_position {
+            (
+                true,
+                Self::pnl_pct_for(pos, price),
+                self.step - pos.entry_step,
+            )
+        } else {
+            (false, 0.0, 0)
+        };
+        let (short_active, short_pnl, short_dur) = if let Some(pos) = &self.short_position {
+            (
+                true,
+                Self::pnl_pct_for(pos, price),
+                self.step - pos.entry_step,
+            )
+        } else {
+            (false, 0.0, 0)
+        };
+
+        // Legacy compat: prefer long if open, else short
+        let (side, pnl, duration) = if long_active {
+            (Some(Side::Buy), long_pnl, long_dur)
+        } else if short_active {
+            (Some(Side::Sell), short_pnl, short_dur)
         } else {
             (None, 0.0, 0)
+        };
+
+        let long_frac = if long_active {
+            self.config.position_size_pct
+        } else {
+            0.0
+        };
+        let short_frac = if short_active {
+            self.config.position_size_pct
+        } else {
+            0.0
         };
 
         let equity = self.compute_equity();
@@ -274,6 +438,14 @@ impl TradingEnv {
             done: self.is_done(),
             balance: self.balance,
             equity,
+            long_position_active: long_active,
+            long_unrealized_pnl: long_pnl,
+            long_hold_duration: long_dur,
+            short_position_active: short_active,
+            short_unrealized_pnl: short_pnl,
+            short_hold_duration: short_dur,
+            net_exposure: long_frac - short_frac,
+            gross_exposure: long_frac + short_frac,
         }
     }
 
@@ -693,5 +865,316 @@ mod tests {
             (reward - 0.0).abs() < f64::EPSILON,
             "zero drawdown_penalty_rate should have no effect, got {reward}"
         );
+    }
+
+    // --- Hedge mode tests ---
+
+    fn hedge_env(candles: Vec<Candle>) -> TradingEnv {
+        let env_cfg = EnvConfig {
+            hedge_mode: true,
+            ..EnvConfig::default()
+        };
+        TradingEnv::with_config(candles, env_cfg, RewardConfig::default())
+    }
+
+    #[test]
+    fn hedge_enter_long_and_short() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        let (obs, _) = env.step(AIAction::EnterLong);
+        assert!(obs.long_position_active);
+        assert!(!obs.short_position_active);
+
+        let (obs, _) = env.step(AIAction::EnterShort);
+        assert!(obs.long_position_active);
+        assert!(obs.short_position_active);
+    }
+
+    #[test]
+    fn hedge_exit_long_keeps_short() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        env.step(AIAction::EnterShort);
+        let (obs, _) = env.step(AIAction::ExitLong);
+        assert!(!obs.long_position_active);
+        assert!(obs.short_position_active);
+        assert_eq!(env.trade_count(), 1);
+    }
+
+    #[test]
+    fn hedge_exit_short_keeps_long() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        env.step(AIAction::EnterShort);
+        let (obs, _) = env.step(AIAction::ExitShort);
+        assert!(obs.long_position_active);
+        assert!(!obs.short_position_active);
+        assert_eq!(env.trade_count(), 1);
+    }
+
+    #[test]
+    fn hedge_equity_both_positions() {
+        // Price rises: long gains, short loses — net effect on equity
+        let candles = vec![
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("120"),
+        ];
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        env.step(AIAction::EnterShort);
+        let (obs, _) = env.step(AIAction::Neutral);
+
+        // With equal sizes, price-up means long gains = short losses (approximately)
+        // Equity should be close to balance since they offset
+        assert!(obs.long_unrealized_pnl > 0.0);
+        assert!(obs.short_unrealized_pnl < 0.0);
+    }
+
+    #[test]
+    fn hedge_net_exposure_zero_when_hedged() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (obs, _) = env.step(AIAction::EnterShort);
+        assert!(
+            obs.net_exposure.abs() < f64::EPSILON,
+            "equal long+short should have net_exposure ~0, got {}",
+            obs.net_exposure
+        );
+        assert!(
+            (obs.gross_exposure - 2.0).abs() < f64::EPSILON,
+            "gross_exposure should be 2.0 (100%+100%), got {}",
+            obs.gross_exposure
+        );
+    }
+
+    #[test]
+    fn hedge_gross_exposure_gate() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            hedge_mode: true,
+            max_gross_exposure: 1.0, // Only allow 100% total
+            ..EnvConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, RewardConfig::default());
+        env.reset();
+
+        // First entry at 100% fills the limit
+        let (obs, _) = env.step(AIAction::EnterLong);
+        assert!(obs.long_position_active);
+
+        // Second entry should be rejected (would be 200% > 100% limit)
+        let (obs, reward) = env.step(AIAction::EnterShort);
+        assert!(
+            !obs.short_position_active,
+            "should reject due to exposure limit"
+        );
+        assert!(reward < 0.0, "should be penalized as invalid");
+    }
+
+    #[test]
+    fn hedge_exposure_penalty() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            hedge_mode: true,
+            max_gross_exposure: 3.0, // Allow entry
+            ..EnvConfig::default()
+        };
+        let reward_cfg = RewardConfig {
+            exposure_penalty_rate: 1.0,
+            exposure_penalty_threshold: 1.5, // Penalty above 150%
+            hold_penalty_threshold: 1000,    // Disable hold penalty
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        // gross = 1.0, below threshold — no penalty on neutral
+        let (_, reward_below) = env.step(AIAction::Neutral);
+        assert!(
+            reward_below.abs() < f64::EPSILON,
+            "no penalty below threshold, got {reward_below}"
+        );
+
+        env.step(AIAction::EnterShort);
+        // gross = 2.0, above 1.5 threshold — penalty = 1.0 * (2.0 - 1.5) = 0.5
+        let (_, reward_above) = env.step(AIAction::Neutral);
+        assert!(
+            reward_above < 0.0,
+            "exposure penalty should apply, got {reward_above}"
+        );
+    }
+
+    #[test]
+    fn hedge_hold_penalty_both() {
+        let candles: Vec<_> = (0..30).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            hedge_mode: true,
+            ..EnvConfig::default()
+        };
+        let reward_cfg = RewardConfig {
+            hold_penalty_threshold: 2,
+            hold_penalty_rate: 0.01,
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong); // step 0
+        env.step(AIAction::EnterShort); // step 1
+
+        // After a few neutrals, both should accumulate penalties
+        let mut total_penalty = 0.0;
+        for _ in 0..5 {
+            let (_, reward) = env.step(AIAction::Neutral);
+            total_penalty += reward;
+        }
+        assert!(
+            total_penalty < 0.0,
+            "hold penalty should accumulate from both sides, got {total_penalty}"
+        );
+    }
+
+    #[test]
+    fn hedge_invalid_double_enter() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (_, reward) = env.step(AIAction::EnterLong);
+        assert!(reward < 0.0, "double enter should be penalized");
+    }
+
+    #[test]
+    fn hedge_invalid_exit_no_position() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        let (_, reward) = env.step(AIAction::ExitLong);
+        assert!(reward < 0.0, "exit with no position should be penalized");
+    }
+
+    #[test]
+    fn hedge_mode_false_rejects_simultaneous() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = TradingEnv::new(candles); // default: hedge_mode = false
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (_, reward) = env.step(AIAction::EnterShort);
+        assert!(
+            reward < 0.0,
+            "one-way mode should reject short while long is open"
+        );
+    }
+
+    #[test]
+    fn hedge_reset_clears_both() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        env.step(AIAction::EnterShort);
+
+        let obs = env.reset();
+        assert!(!obs.long_position_active);
+        assert!(!obs.short_position_active);
+        assert!(obs.gross_exposure.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hedge_bonus_when_both_open() {
+        let candles: Vec<_> = (0..10).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            hedge_mode: true,
+            ..EnvConfig::default()
+        };
+        let reward_cfg = RewardConfig {
+            hedge_bonus: 0.1,
+            hold_penalty_threshold: 1000, // Disable hold penalty
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        env.step(AIAction::EnterShort);
+        // Both open: bonus = 0.1 * min(1.0, 1.0) = 0.1
+        let (_, reward) = env.step(AIAction::Neutral);
+        assert!(
+            reward > 0.0,
+            "hedge bonus should produce positive reward, got {reward}"
+        );
+    }
+
+    #[test]
+    fn hedge_observation_fields() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("110"),
+        ];
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong); // step 0, long opens
+        env.step(AIAction::EnterShort); // step 1, short opens
+        let (obs, _) = env.step(AIAction::Neutral); // step 2, price at 110
+
+        assert!(obs.long_position_active);
+        assert!(obs.short_position_active);
+        assert!(
+            obs.long_unrealized_pnl > 0.0,
+            "long should profit from 100→110"
+        );
+        assert!(
+            obs.short_unrealized_pnl < 0.0,
+            "short should lose from 100→110"
+        );
+        assert_eq!(obs.long_hold_duration, 3); // entered at step 0, now observing step 3
+        assert_eq!(obs.short_hold_duration, 2); // entered at step 1, now observing step 3
+                                                // Legacy compat: prefers long
+        assert_eq!(obs.position_side, Some(Side::Buy));
+    }
+
+    #[test]
+    fn hedge_metrics_track_both_sides() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("110"),
+            candle_price("110"),
+        ];
+        let mut env = hedge_env(candles);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        env.step(AIAction::EnterShort);
+        env.step(AIAction::ExitLong);
+        env.step(AIAction::ExitShort);
+
+        assert_eq!(env.trade_count(), 2);
+        let metrics = env.episode_metrics(35040.0);
+        assert_eq!(metrics.total_trades, 2);
     }
 }
