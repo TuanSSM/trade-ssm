@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
 use ssm_ai::config::{OptimizeConfig, RlConfig};
-use ssm_ai::env::Observation;
+use ssm_ai::env::{Observation, TradingEnv};
+use ssm_ai::features::extract_features;
 use ssm_ai::metrics::EpisodeMetrics;
+use ssm_ai::model::{AIModel, TableModel};
 use ssm_ai::multi_timeframe::Timeframe;
 use ssm_ai::optimizer::{
     grid_search, optimize, random_search, run_trial, Objective, ParamRange, SearchSpace,
@@ -10,6 +12,8 @@ use ssm_core::{AIAction, Candle};
 use ssm_exchange::history;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+const CVD_WINDOW: usize = 15;
 
 /// Full config file structure including optimizer settings.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -68,9 +72,10 @@ fn main() -> Result<()> {
 
     match mode.as_str() {
         "single" => run_single(&candles, &rl_config, &tf_str, &path)?,
+        "model" => run_model(&candles, &rl_config, &tf_str, &path)?,
         "optimize" => run_optimize(&candles, &rl_config, &opt_config, &tf_str, &path)?,
         "multi_tf" => run_multi_tf(&candles, &rl_config, &path)?,
-        other => bail!("unknown RL_MODE: {other} (expected: single, optimize, multi_tf)"),
+        other => bail!("unknown RL_MODE: {other} (expected: single, model, optimize, multi_tf)"),
     }
 
     Ok(())
@@ -134,6 +139,72 @@ fn run_single(
     serde_json::to_writer_pretty(std::io::BufWriter::new(file), &metrics)
         .context("writing results")?;
     tracing::info!(file = %out_path.display(), "RL backtest results saved");
+
+    Ok(())
+}
+
+fn run_model(
+    candles: &[Candle],
+    config: &RlConfig,
+    tf_str: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    let model_path =
+        std::env::var("MODEL_PATH").context("MODEL_PATH env var required for RL_MODE=model")?;
+    let tf = Timeframe::parse(tf_str).unwrap_or(Timeframe::M15);
+    let steps_per_year = tf.steps_per_year();
+
+    tracing::info!(model = %model_path, "loading trained model for backtest");
+    let model = TableModel::from_checkpoint(&PathBuf::from(&model_path))?;
+
+    // Run model-based backtest
+    let features = extract_features(candles, CVD_WINDOW);
+    let mut env =
+        TradingEnv::with_config(candles.to_vec(), config.env.clone(), config.reward.clone());
+    let mut obs = env.reset();
+
+    while !obs.done {
+        let action = if obs.step < features.len() {
+            model
+                .predict(&features[obs.step])
+                .unwrap_or(AIAction::Neutral)
+        } else {
+            AIAction::Neutral
+        };
+        let (new_obs, _) = env.step(action);
+        obs = new_obs;
+    }
+
+    let model_metrics = env.episode_metrics(steps_per_year);
+
+    // Run momentum baseline for comparison
+    let baseline_metrics = run_trial(candles, config, steps_per_year, &momentum_policy);
+
+    println!("\n=== Model Backtest Results ({tf_str}) ===");
+    print_metrics(&model_metrics, tf_str);
+
+    println!("\n=== Momentum Baseline ({tf_str}) ===");
+    print_metrics(&baseline_metrics, tf_str);
+
+    println!("\n=== Comparison ===");
+    println!("Model alpha vs B&H:      {:.2}%", model_metrics.alpha);
+    println!("Baseline alpha vs B&H:   {:.2}%", baseline_metrics.alpha);
+    println!(
+        "Model vs Baseline:       {:.2}%",
+        model_metrics.total_return_pct - baseline_metrics.total_return_pct
+    );
+
+    // Write results
+    let out_path = path.with_extension("rl-model-backtest.json");
+    let results = serde_json::json!({
+        "model": model_metrics,
+        "baseline": baseline_metrics,
+        "model_path": model_path,
+    });
+    let file = std::fs::File::create(&out_path).context("creating output file")?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(file), &results)
+        .context("writing results")?;
+    tracing::info!(file = %out_path.display(), "model backtest results saved");
 
     Ok(())
 }

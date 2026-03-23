@@ -123,7 +123,7 @@ mod tests {
         let result = rsi(&candles, 14);
         for val in &result {
             let v = val.to_f64().unwrap();
-            assert!(v >= 0.0 && v <= 100.0, "RSI out of range: {v}");
+            assert!((0.0..=100.0).contains(&v), "RSI out of range: {v}");
         }
     }
 

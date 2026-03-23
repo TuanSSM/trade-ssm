@@ -9,6 +9,7 @@ ssm-core = { workspace = true }
 ssm-nats = { workspace = true }
 ssm-indicators = { workspace = true }
 ssm-strategy = { workspace = true }
+ssm-ai = { workspace = true }
 ssm-orderflow = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

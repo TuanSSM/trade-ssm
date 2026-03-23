@@ -18,6 +18,7 @@ pub struct TradingEnv {
     reward_config: RewardConfig,
     balance: f64,
     metrics: MetricsAccumulator,
+    equity_peak: f64,
 }
 
 struct EnvPosition {
@@ -64,6 +65,7 @@ impl TradingEnv {
             trade_count: 0,
             metrics: MetricsAccumulator::new(balance, first_price),
             balance,
+            equity_peak: balance,
             config,
             reward_config,
         }
@@ -75,6 +77,7 @@ impl TradingEnv {
         self.total_reward = 0.0;
         self.trade_count = 0;
         self.balance = self.config.initial_balance;
+        self.equity_peak = self.balance;
         let first_price = self
             .candles
             .first()
@@ -144,10 +147,21 @@ impl TradingEnv {
             }
         }
 
+        // Apply drawdown penalty
+        let equity = self.compute_equity();
+        if equity > self.equity_peak {
+            self.equity_peak = equity;
+        }
+        if self.reward_config.drawdown_penalty_rate > 0.0 && self.equity_peak > 0.0 {
+            let drawdown = (self.equity_peak - equity) / self.equity_peak;
+            if drawdown > 0.0 {
+                reward -= drawdown * self.reward_config.drawdown_penalty_rate;
+            }
+        }
+
         self.total_reward += reward;
         self.step += 1;
 
-        let equity = self.compute_equity();
         let obs_price = self.current_price();
         self.metrics.record_step(equity, obs_price);
 
@@ -449,5 +463,76 @@ mod tests {
         let obs = env.reset();
         assert!((obs.equity - 10_000.0).abs() < f64::EPSILON);
         assert!((obs.balance - 10_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn drawdown_penalty_applied_when_equity_drops() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"), // enter long here, equity rises
+            candle_price("90"),  // price drops, equity below peak
+            candle_price("85"),  // further drop
+        ];
+        let env_cfg = EnvConfig::default();
+        let reward_cfg = RewardConfig {
+            drawdown_penalty_rate: 1.0,
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, reward_cfg);
+        env.reset();
+
+        // Enter long at 100
+        env.step(AIAction::EnterLong);
+        // Hold at 110 — equity should be at peak, no drawdown penalty
+        let (_, reward_at_peak) = env.step(AIAction::Neutral);
+        // Hold at 90 — equity dropped below peak, drawdown penalty should apply
+        let (_, reward_in_drawdown) = env.step(AIAction::Neutral);
+        assert!(
+            reward_in_drawdown < reward_at_peak,
+            "drawdown penalty should reduce reward: peak_reward={reward_at_peak}, drawdown_reward={reward_in_drawdown}"
+        );
+    }
+
+    #[test]
+    fn no_drawdown_penalty_at_new_highs() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("120"),
+        ];
+        let reward_cfg = RewardConfig {
+            drawdown_penalty_rate: 1.0,
+            hold_penalty_threshold: 1000, // disable hold penalty
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, EnvConfig::default(), reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        // Price keeps rising — no drawdown
+        let (_, reward) = env.step(AIAction::Neutral);
+        assert!(
+            (reward - 0.0).abs() < f64::EPSILON,
+            "no drawdown penalty at new highs, got {reward}"
+        );
+    }
+
+    #[test]
+    fn drawdown_penalty_zero_rate_has_no_effect() {
+        let candles = vec![candle_price("100"), candle_price("110"), candle_price("80")];
+        let reward_cfg = RewardConfig {
+            drawdown_penalty_rate: 0.0,
+            hold_penalty_threshold: 1000,
+            ..RewardConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, EnvConfig::default(), reward_cfg);
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        let (_, reward) = env.step(AIAction::Neutral);
+        assert!(
+            (reward - 0.0).abs() < f64::EPSILON,
+            "zero drawdown_penalty_rate should have no effect, got {reward}"
+        );
     }
 }

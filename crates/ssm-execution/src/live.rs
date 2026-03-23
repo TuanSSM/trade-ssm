@@ -2,6 +2,24 @@ use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use ssm_core::{Order, OrderStatus};
 
+/// Account balance information from Binance.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BalanceInfo {
+    pub asset: String,
+    pub balance: Decimal,
+    pub available: Decimal,
+}
+
+/// Open position information from Binance.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PositionInfo {
+    pub symbol: String,
+    pub amount: Decimal,
+    pub entry_price: Decimal,
+    pub unrealized_pnl: Decimal,
+    pub leverage: u32,
+}
+
 /// Live execution engine for Binance Futures.
 ///
 /// Uses signed API (HMAC-SHA256) for order placement.
@@ -134,6 +152,152 @@ impl LiveEngine {
 
         tracing::info!(order_id, symbol, "order cancelled on Binance");
         Ok(())
+    }
+
+    /// Query order status from Binance.
+    pub async fn query_order(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let params = [
+            ("symbol", symbol.to_string()),
+            ("origClientOrderId", order_id.to_string()),
+            ("timestamp", timestamp.to_string()),
+        ];
+
+        let query_string: String = params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let signature = self.sign(&query_string);
+        let url = format!("{}/fapi/v1/order", self.base_url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-MBX-APIKEY", &self.api_key)
+            .query(&params)
+            .query(&[("signature", &signature)])
+            .send()
+            .await
+            .context("querying order on Binance")?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Binance order query failed: {body}");
+        }
+
+        let body: serde_json::Value = resp.json().await.context("parsing order response")?;
+        let status_str = body["status"].as_str().unwrap_or("UNKNOWN");
+        let status = match status_str {
+            "NEW" => OrderStatus::Open,
+            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            "FILLED" => OrderStatus::Filled,
+            "CANCELED" => OrderStatus::Cancelled,
+            "REJECTED" => OrderStatus::Rejected,
+            "EXPIRED" => OrderStatus::Expired,
+            _ => OrderStatus::Pending,
+        };
+
+        tracing::debug!(order_id, symbol, ?status, "order status queried");
+        Ok(status)
+    }
+
+    /// Fetch account balance from Binance Futures.
+    pub async fn fetch_balance(&self) -> Result<Vec<BalanceInfo>> {
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let query_string = format!("timestamp={timestamp}");
+        let signature = self.sign(&query_string);
+        let url = format!("{}/fapi/v2/balance", self.base_url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-MBX-APIKEY", &self.api_key)
+            .query(&[("timestamp", &timestamp.to_string())])
+            .query(&[("signature", &signature)])
+            .send()
+            .await
+            .context("fetching balance from Binance")?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Binance balance query failed: {body}");
+        }
+
+        let balances: Vec<serde_json::Value> =
+            resp.json().await.context("parsing balance response")?;
+
+        let result: Vec<BalanceInfo> = balances
+            .iter()
+            .filter_map(|b| {
+                let asset = b["asset"].as_str()?;
+                let balance: Decimal = b["balance"].as_str()?.parse().ok()?;
+                let available: Decimal = b["availableBalance"].as_str()?.parse().ok()?;
+                if balance > Decimal::ZERO {
+                    Some(BalanceInfo {
+                        asset: asset.to_string(),
+                        balance,
+                        available,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        tracing::info!(assets = result.len(), "balance fetched from Binance");
+        Ok(result)
+    }
+
+    /// Fetch open positions from Binance Futures.
+    pub async fn fetch_positions(&self) -> Result<Vec<PositionInfo>> {
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let query_string = format!("timestamp={timestamp}");
+        let signature = self.sign(&query_string);
+        let url = format!("{}/fapi/v2/positionRisk", self.base_url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-MBX-APIKEY", &self.api_key)
+            .query(&[("timestamp", &timestamp.to_string())])
+            .query(&[("signature", &signature)])
+            .send()
+            .await
+            .context("fetching positions from Binance")?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Binance position query failed: {body}");
+        }
+
+        let positions: Vec<serde_json::Value> =
+            resp.json().await.context("parsing position response")?;
+
+        let result: Vec<PositionInfo> = positions
+            .iter()
+            .filter_map(|p| {
+                let symbol = p["symbol"].as_str()?;
+                let amount: Decimal = p["positionAmt"].as_str()?.parse().ok()?;
+                if amount == Decimal::ZERO {
+                    return None;
+                }
+                let entry_price: Decimal = p["entryPrice"].as_str()?.parse().ok()?;
+                let unrealized_pnl: Decimal = p["unRealizedProfit"].as_str()?.parse().ok()?;
+                let leverage: u32 = p["leverage"].as_str()?.parse().ok()?;
+                Some(PositionInfo {
+                    symbol: symbol.to_string(),
+                    amount,
+                    entry_price,
+                    unrealized_pnl,
+                    leverage,
+                })
+            })
+            .collect();
+
+        tracing::info!(positions = result.len(), "positions fetched from Binance");
+        Ok(result)
     }
 
     /// HMAC-SHA256 signature for Binance API.
