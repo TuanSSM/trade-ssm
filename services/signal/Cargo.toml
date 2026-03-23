@@ -1,0 +1,17 @@
+[package]
+name = "signal-service"
+description = "Strategy execution and signal generation service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ssm-core = { workspace = true }
+ssm-nats = { workspace = true }
+ssm-indicators = { workspace = true }
+ssm-strategy = { workspace = true }
+ssm-orderflow = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }

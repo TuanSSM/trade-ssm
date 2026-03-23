@@ -1,19 +1,15 @@
 [package]
-name = "ssm-exchange"
-description = "Exchange connectors for trade-ssm (Binance REST)"
+name = "ssm-nats"
+description = "NATS pub/sub messaging for trade-ssm microservices"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 ssm-core = { workspace = true }
-reqwest = { workspace = true }
+async-nats = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rust_decimal = { workspace = true }
-chrono = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
-url = { workspace = true }

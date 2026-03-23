@@ -33,7 +33,7 @@ pub struct Trade {
 }
 
 /// Liquidation event from futures exchange.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Liquidation {
     pub symbol: String,
     pub side: String,
