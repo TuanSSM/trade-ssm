@@ -3,3 +3,6 @@
 .env
 *.swp
 *.swo
+# Backtest output files (generated, not committed)
+test_data/*.backtest.json
+test_data/*.rl-backtest.json
