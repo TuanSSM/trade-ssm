@@ -137,7 +137,7 @@ mod tests {
         let bb = bollinger_bands(&candles, 20, Decimal::from(2));
         for b in &bb.pct_b {
             let v = b.to_f64().unwrap();
-            assert!(v >= -0.5 && v <= 1.5, "%B out of expected range: {v}");
+            assert!((-0.5..=1.5).contains(&v), "%B out of expected range: {v}");
         }
     }
 

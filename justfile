@@ -62,6 +62,32 @@ rl-optimize datafile config="config/rl-default.toml":
 rl-multi-tf datafile config="config/rl-default.toml":
     DATAFILE={{ datafile }} RL_MODE=multi_tf RL_CONFIG={{ config }} cargo run --bin rl-backtest
 
+# Run RL backtest with trained model
+rl-model-backtest datafile model_path="models/table_model_best.json":
+    DATAFILE={{ datafile }} RL_MODE=model MODEL_PATH={{ model_path }} cargo run --bin rl-backtest
+
+# === Docker RL (training & deployment) ===
+
+# Start RL training pipeline (data-feed + NATS + rl-trainer)
+docker-rl-train:
+    docker compose --profile rl up -d
+
+# Deploy RL model for paper trading (data-feed + signal + execution)
+docker-rl-deploy-paper:
+    EXECUTION_MODE=paper STRATEGY_MODE=ai docker compose --profile deploy up -d
+
+# Deploy RL model for live trading (data-feed + signal + execution)
+docker-rl-deploy-live:
+    EXECUTION_MODE=live STRATEGY_MODE=ai docker compose --profile deploy up -d
+
+# Run RL backtest via Docker
+docker-rl-backtest datafile:
+    DATAFILE={{ datafile }} docker compose run --rm rl-backtest
+
+# Tail RL training logs
+docker-rl-logs:
+    docker compose logs -f rl-trainer
+
 # === Docker (freqtrade-inspired) ===
 
 # Build all Docker images
@@ -98,7 +124,7 @@ docker-integration-test:
     docker build -t trade-ssm:integration-test .
     echo ""
     echo "=== Binary Verification ==="
-    for bin in analyzer download-data backtest rl-backtest; do
+    for bin in analyzer download-data backtest rl-backtest rl-trainer data-feed signal-service execution-service; do
         if docker run --rm trade-ssm:integration-test sh -c "test -x /usr/local/bin/$bin"; then
             echo "  ✓ $bin"
         else

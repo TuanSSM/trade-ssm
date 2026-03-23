@@ -1,7 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ssm_core::Candle;
 use ssm_nats::{Publisher, Subscriber};
-use ssm_strategy::cvd_momentum::CvdMomentumStrategy;
 use ssm_strategy::traits::Strategy;
 use tokio::sync::mpsc;
 
@@ -20,14 +19,34 @@ async fn main() -> Result<()> {
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
+    let strategy_mode = env_or("STRATEGY_MODE", "cvd");
 
-    tracing::info!(%symbol, %interval, "signal service starting");
+    tracing::info!(%symbol, %interval, %strategy_mode, "signal service starting");
+
+    let strategy: Box<dyn Strategy> = match strategy_mode.as_str() {
+        "ai" => {
+            let model_path = std::env::var("MODEL_PATH")
+                .context("MODEL_PATH env var required when STRATEGY_MODE=ai")?;
+            tracing::info!(%model_path, "loading AI model for signal generation");
+            let model =
+                ssm_ai::model::TableModel::from_checkpoint(&std::path::PathBuf::from(&model_path))?;
+            Box::new(ssm_strategy::ai_strategy::AiStrategy::new(
+                Box::new(model),
+                CVD_WINDOW,
+            ))
+        }
+        _ => {
+            tracing::info!("using CVD momentum strategy");
+            Box::new(ssm_strategy::cvd_momentum::CvdMomentumStrategy::new(
+                CVD_WINDOW,
+            ))
+        }
+    };
 
     let nats_client = ssm_nats::connect().await?;
     let publisher = Publisher::new(nats_client.clone());
     let subscriber = Subscriber::new(nats_client);
 
-    let strategy = CvdMomentumStrategy::new(CVD_WINDOW);
     let signal_topic = ssm_nats::topics::signals(&symbol);
 
     // Subscribe to candle feed
@@ -59,6 +78,7 @@ async fn main() -> Result<()> {
                     tracing::info!(
                         action = ?signal.action,
                         confidence = signal.confidence,
+                        source = %signal.source,
                         "signal generated"
                     );
                     if let Err(e) = publisher.publish(&signal_topic, &signal).await {
