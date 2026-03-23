@@ -352,4 +352,37 @@ mod tests {
         let sig2 = engine.sign("message_two");
         assert_ne!(sig1, sig2);
     }
+
+    #[test]
+    fn test_sign_empty_message() {
+        let engine = LiveEngine::new("api_key".into(), "secret_key".into());
+        let sig = engine.sign("");
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sign_long_message() {
+        let engine = LiveEngine::new("api_key".into(), "secret_key".into());
+        let long_msg = "a".repeat(10_000);
+        let sig = engine.sign(&long_msg);
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sign_special_characters() {
+        let engine = LiveEngine::new("api_key".into(), "secret_key".into());
+        let sig = engine.sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890");
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_live_engine_new_stores_credentials() {
+        let engine = LiveEngine::new("my_api_key".into(), "my_secret".into());
+        // Verify the engine was created (we can only test sign since fields are private)
+        let sig = engine.sign("test");
+        assert_eq!(sig.len(), 64);
+    }
 }

@@ -361,4 +361,230 @@ mod tests {
         assert!(tracker.all().contains_key("ETHUSDT"));
         assert!(tracker.all().contains_key("SOLUSDT"));
     }
+
+    #[test]
+    fn test_position_flip_long_to_short() {
+        let mut tracker = PositionTracker::new();
+
+        // Open long 3
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(3), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+        assert_eq!(tracker.get("BTCUSDT").unwrap().side, Side::Buy);
+
+        // Sell 5 — close long 3, open short 2
+        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(5), Decimal::from(52000));
+        tracker.apply_fill(&sell, Decimal::from(52000));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        assert_eq!(pos.side, Side::Sell);
+        assert_eq!(pos.quantity, Decimal::from(2));
+        assert_eq!(pos.entry_price, Decimal::from(52000));
+    }
+
+    #[test]
+    fn test_position_flip_short_to_long() {
+        let mut tracker = PositionTracker::new();
+
+        // Open short 2
+        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(2), Decimal::from(50000));
+        tracker.apply_fill(&sell, Decimal::from(50000));
+        assert_eq!(tracker.get("BTCUSDT").unwrap().side, Side::Sell);
+
+        // Buy 5 — close short 2, open long 3
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(5), Decimal::from(48000));
+        tracker.apply_fill(&buy, Decimal::from(48000));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        assert_eq!(pos.side, Side::Buy);
+        assert_eq!(pos.quantity, Decimal::from(3));
+        assert_eq!(pos.entry_price, Decimal::from(48000));
+    }
+
+    #[test]
+    fn test_position_flip_preserves_realized_pnl() {
+        let mut tracker = PositionTracker::new();
+
+        // Open long 2 at 50000
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(2), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+
+        // Sell 3 at 52000 — close long 2 (profit 4000), open short 1
+        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(3), Decimal::from(52000));
+        tracker.apply_fill(&sell, Decimal::from(52000));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        // realized_pnl from closing long: (52000 - 50000) * 2 = 4000
+        assert_eq!(pos.realized_pnl, Decimal::from(4000));
+    }
+
+    #[test]
+    fn test_partial_fill_reduces_quantity() {
+        let mut tracker = PositionTracker::new();
+
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(10), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+
+        // Close 3 of 10
+        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(3), Decimal::from(51000));
+        tracker.apply_fill(&sell, Decimal::from(51000));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        assert_eq!(pos.quantity, Decimal::from(7));
+        assert_eq!(pos.side, Side::Buy);
+        // PnL: (51000 - 50000) * 3 = 3000
+        assert_eq!(pos.realized_pnl, Decimal::from(3000));
+    }
+
+    #[test]
+    fn test_multiple_partial_fills() {
+        let mut tracker = PositionTracker::new();
+
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(10), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+
+        // Close 3
+        let sell1 = fill_order("BTCUSDT", Side::Sell, Decimal::from(3), Decimal::from(51000));
+        tracker.apply_fill(&sell1, Decimal::from(51000));
+
+        // Close 4
+        let sell2 = fill_order("BTCUSDT", Side::Sell, Decimal::from(4), Decimal::from(52000));
+        tracker.apply_fill(&sell2, Decimal::from(52000));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        assert_eq!(pos.quantity, Decimal::from(3));
+        // PnL: (51000-50000)*3 + (52000-50000)*4 = 3000 + 8000 = 11000
+        assert_eq!(pos.realized_pnl, Decimal::from(11000));
+    }
+
+    #[test]
+    fn test_mark_to_market_with_no_positions() {
+        let mut tracker = PositionTracker::new();
+        let mut prices = HashMap::new();
+        prices.insert("BTCUSDT".into(), Decimal::from(50000));
+        // Should not panic
+        tracker.mark_to_market(&prices);
+        assert!(tracker.all().is_empty());
+    }
+
+    #[test]
+    fn test_mark_to_market_missing_price() {
+        let mut tracker = PositionTracker::new();
+
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(1), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+
+        // Mark to market with a different symbol — BTCUSDT unrealized should stay 0
+        let mut prices = HashMap::new();
+        prices.insert("ETHUSDT".into(), Decimal::from(3000));
+        tracker.mark_to_market(&prices);
+
+        assert_eq!(
+            tracker.get("BTCUSDT").unwrap().unrealized_pnl,
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn test_mark_to_market_multiple_symbols() {
+        let mut tracker = PositionTracker::new();
+
+        let btc = fill_order("BTCUSDT", Side::Buy, Decimal::from(1), Decimal::from(50000));
+        tracker.apply_fill(&btc, Decimal::from(50000));
+
+        let eth = fill_order("ETHUSDT", Side::Sell, Decimal::from(10), Decimal::from(3000));
+        tracker.apply_fill(&eth, Decimal::from(3000));
+
+        let mut prices = HashMap::new();
+        prices.insert("BTCUSDT".into(), Decimal::from(55000));
+        prices.insert("ETHUSDT".into(), Decimal::from(2800));
+        tracker.mark_to_market(&prices);
+
+        // BTC long: (55000 - 50000) * 1 = 5000
+        assert_eq!(
+            tracker.get("BTCUSDT").unwrap().unrealized_pnl,
+            Decimal::from(5000)
+        );
+        // ETH short: (3000 - 2800) * 10 = 2000
+        assert_eq!(
+            tracker.get("ETHUSDT").unwrap().unrealized_pnl,
+            Decimal::from(2000)
+        );
+    }
+
+    #[test]
+    fn test_mark_to_market_negative_unrealized() {
+        let mut tracker = PositionTracker::new();
+
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(2), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+
+        let mut prices = HashMap::new();
+        prices.insert("BTCUSDT".into(), Decimal::from(48000));
+        tracker.mark_to_market(&prices);
+
+        // (48000 - 50000) * 2 = -4000
+        assert_eq!(
+            tracker.get("BTCUSDT").unwrap().unrealized_pnl,
+            Decimal::from(-4000)
+        );
+    }
+
+    #[test]
+    fn test_default_tracker() {
+        let tracker = PositionTracker::default();
+        assert!(tracker.all().is_empty());
+        assert!(!tracker.has_position("BTCUSDT"));
+    }
+
+    #[test]
+    fn test_entry_price_weighted_average_unequal_quantities() {
+        let mut tracker = PositionTracker::new();
+
+        // Buy 1 at 100
+        let buy1 = fill_order("BTCUSDT", Side::Buy, Decimal::from(1), Decimal::from(100));
+        tracker.apply_fill(&buy1, Decimal::from(100));
+
+        // Buy 3 at 200
+        let buy2 = fill_order("BTCUSDT", Side::Buy, Decimal::from(3), Decimal::from(200));
+        tracker.apply_fill(&buy2, Decimal::from(200));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        assert_eq!(pos.quantity, Decimal::from(4));
+        // Weighted average: (100*1 + 200*3) / 4 = 700/4 = 175
+        assert_eq!(pos.entry_price, Decimal::from(175));
+    }
+
+    #[test]
+    fn test_exact_close_removes_position() {
+        let mut tracker = PositionTracker::new();
+
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(5), Decimal::from(50000));
+        tracker.apply_fill(&buy, Decimal::from(50000));
+
+        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(5), Decimal::from(50000));
+        tracker.apply_fill(&sell, Decimal::from(50000));
+
+        // Position should be completely removed
+        assert!(tracker.get("BTCUSDT").is_none());
+        assert!(!tracker.has_position("BTCUSDT"));
+    }
+
+    #[test]
+    fn test_short_position_partial_close_pnl() {
+        let mut tracker = PositionTracker::new();
+
+        // Open short 10 at 100
+        let sell = fill_order("BTCUSDT", Side::Sell, Decimal::from(10), Decimal::from(100));
+        tracker.apply_fill(&sell, Decimal::from(100));
+
+        // Close 4 at 90 — profit
+        let buy = fill_order("BTCUSDT", Side::Buy, Decimal::from(4), Decimal::from(90));
+        tracker.apply_fill(&buy, Decimal::from(90));
+
+        let pos = tracker.get("BTCUSDT").unwrap();
+        assert_eq!(pos.quantity, Decimal::from(6));
+        assert_eq!(pos.side, Side::Sell);
+        // PnL: (100 - 90) * 4 = 40
+        assert_eq!(pos.realized_pnl, Decimal::from(40));
+    }
 }

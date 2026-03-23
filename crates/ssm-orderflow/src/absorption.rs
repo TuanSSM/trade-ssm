@@ -295,4 +295,109 @@ mod tests {
         // open is zero, so range_pct calculation hits continue
         assert!(events.is_empty());
     }
+
+    #[test]
+    fn single_candle_detected_with_unit_multiple() {
+        // Single candle with volume_multiple=1 means threshold == avg == volume itself
+        // volume >= threshold passes, but we need volume >= min_volume_threshold too
+        let candles = vec![
+            candle_with("40000", "40002", "39999", "40001", "50", "30", "20"),
+        ];
+        let config = AbsorptionConfig {
+            min_volume_threshold: Decimal::from(50),
+            max_range_pct: Decimal::new(5, 3),
+            volume_multiple: Decimal::from(1),
+        };
+        let events = detect_absorption(&candles, &config);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].index, 0);
+    }
+
+    #[test]
+    fn extreme_volume_ratio_high_absorption_strength() {
+        // Very high volume with very tight range yields large absorption_strength
+        let candles = vec![
+            candle_with("50000", "50001", "50000", "50001", "5", "3", "2"),
+            candle_with("50000", "50000.5", "49999.5", "50000", "10000", "6000", "4000"),
+        ];
+        let config = AbsorptionConfig {
+            min_volume_threshold: Decimal::from(5),
+            max_range_pct: Decimal::new(5, 3),
+            volume_multiple: Decimal::from(1),
+        };
+        let events = detect_absorption(&candles, &config);
+        assert_eq!(events.len(), 1);
+        // range = 1, volume = 10000, strength = 10000/1 = 10000
+        assert_eq!(events[0].absorption_strength, Decimal::from(10000));
+    }
+
+    #[test]
+    fn range_pct_exactly_at_max_boundary_included() {
+        // range_pct == max_range_pct exactly should NOT pass (> check means equal is ok)
+        // Actually: if range_pct > max_range_pct { continue } — so equal passes through
+        // open=50000, high=50100, low=50000, range=100, range_pct=100/50000=0.002
+        let candles = vec![
+            candle_with("50000", "50100", "50000", "50050", "5", "3", "2"),
+            candle_with("50000", "50100", "50000", "50050", "100", "60", "40"),
+        ];
+        let config = AbsorptionConfig {
+            min_volume_threshold: Decimal::from(5),
+            max_range_pct: Decimal::new(2, 3), // 0.002 exactly
+            volume_multiple: Decimal::from(1),
+        };
+        let events = detect_absorption(&candles, &config);
+        // range_pct = 0.002, max_range_pct = 0.002, so 0.002 > 0.002 is false => included
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].index, 1);
+    }
+
+    #[test]
+    fn range_pct_just_above_max_boundary_excluded() {
+        // range_pct just above max_range_pct should be excluded
+        // open=50000, high=50101, low=50000, range=101, range_pct=101/50000=0.00202
+        let candles = vec![
+            candle_with("50000", "50101", "50000", "50050", "5", "3", "2"),
+            candle_with("50000", "50101", "50000", "50050", "100", "60", "40"),
+        ];
+        let config = AbsorptionConfig {
+            min_volume_threshold: Decimal::from(5),
+            max_range_pct: Decimal::new(2, 3), // 0.002
+            volume_multiple: Decimal::from(1),
+        };
+        let events = detect_absorption(&candles, &config);
+        assert!(events.is_empty(), "range_pct > max_range_pct should be excluded");
+    }
+
+    #[test]
+    fn equal_buy_sell_volume_absorbed_side_is_sell() {
+        // delta == 0 when buy == sell; delta > 0 is false so absorbed_side = Sell
+        let candles = vec![
+            candle_with("50000", "50001", "49999", "50000", "5", "3", "2"),
+            candle_with("50000", "50001", "49999", "50000", "100", "50", "50"),
+        ];
+        let config = AbsorptionConfig {
+            min_volume_threshold: Decimal::from(5),
+            max_range_pct: Decimal::new(5, 3),
+            volume_multiple: Decimal::from(1),
+        };
+        let events = detect_absorption(&candles, &config);
+        assert_eq!(events.len(), 1);
+        // delta = 50 - 50 = 0, which is not > 0, so absorbed_side = Sell
+        assert_eq!(events[0].absorbed_side, Side::Sell);
+    }
+
+    #[test]
+    fn many_normal_candles_one_spike() {
+        // 10 normal candles, then 1 spike. Ensures avg calculation works at scale
+        let mut candles: Vec<Candle> = (0..10)
+            .map(|_| candle_with("50000", "50010", "49990", "50005", "10", "5", "5"))
+            .collect();
+        // Spike candle: volume=200, avg=~27.27, threshold(2x)=~54.5, vol 200 > 54.5
+        candles.push(candle_with("50000", "50002", "49999", "50001", "200", "150", "50"));
+        let config = AbsorptionConfig::default(); // min_vol=10, max_range_pct=0.002, vol_mult=2
+        let events = detect_absorption(&candles, &config);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].index, 10);
+        assert_eq!(events[0].absorbed_side, Side::Buy);
+    }
 }

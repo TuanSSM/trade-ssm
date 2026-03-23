@@ -250,4 +250,170 @@ mod tests {
         let candles = vec![dummy_candle()];
         assert!(strategy.analyze(&candles).unwrap().is_none());
     }
+
+    struct AlwaysNone;
+    impl Strategy for AlwaysNone {
+        fn name(&self) -> &str {
+            "always_none"
+        }
+        fn analyze(&self, _candles: &[Candle]) -> Result<Option<Signal>> {
+            Ok(None)
+        }
+    }
+
+    struct AlwaysExitLong;
+    impl Strategy for AlwaysExitLong {
+        fn name(&self) -> &str {
+            "always_exit_long"
+        }
+        fn analyze(&self, candles: &[Candle]) -> Result<Option<Signal>> {
+            if candles.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(Signal {
+                timestamp: 0,
+                symbol: "TEST".into(),
+                action: AIAction::ExitLong,
+                confidence: 0.9,
+                source: "always_exit_long".into(),
+                metadata: Default::default(),
+            }))
+        }
+    }
+
+    #[test]
+    fn zero_strategies_returns_none() {
+        let strategy = CompositeStrategy::new("empty_composite");
+        assert!(strategy.analyze(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn zero_strategies_with_candles_returns_none() {
+        let strategy = CompositeStrategy::new("empty_composite");
+        let candles = vec![dummy_candle(), dummy_candle()];
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn single_strategy_passthrough_long() {
+        let strategy = CompositeStrategy::new("single_pass")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysLong), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterLong);
+        assert_eq!(signal.source, "single_pass");
+    }
+
+    #[test]
+    fn single_strategy_passthrough_short() {
+        let strategy = CompositeStrategy::new("single_pass")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysShort), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterShort);
+    }
+
+    #[test]
+    fn conflicting_equal_weight_strategies() {
+        // Long and Short with equal weight and equal confidence
+        // One should win based on voting mechanism
+        let strategy = CompositeStrategy::new("conflict")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysLong), 1.0)
+            .add(Box::new(AlwaysShort), 1.0);
+        let candles = vec![dummy_candle()];
+        let result = strategy.analyze(&candles).unwrap();
+        // Both have 0.9 confidence * 1.0 weight = 0.9 vote each
+        // Either action could win (implementation picks max); result should be Some
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn three_way_conflict_majority_long() {
+        let strategy = CompositeStrategy::new("three_way")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysLong), 1.0)
+            .add(Box::new(AlwaysLong), 1.0)
+            .add(Box::new(AlwaysShort), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterLong);
+    }
+
+    #[test]
+    fn three_way_conflict_majority_short() {
+        let strategy = CompositeStrategy::new("three_way")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysShort), 1.0)
+            .add(Box::new(AlwaysShort), 1.0)
+            .add(Box::new(AlwaysLong), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterShort);
+    }
+
+    #[test]
+    fn all_none_strategies_returns_none() {
+        // All strategies return None, which votes Neutral with 0.5 weight
+        // Neutral action is filtered out in analyze
+        let strategy = CompositeStrategy::new("all_none")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysNone), 1.0)
+            .add(Box::new(AlwaysNone), 1.0);
+        let candles = vec![dummy_candle()];
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn name_returns_constructor_name() {
+        let strategy = CompositeStrategy::new("custom_name");
+        assert_eq!(strategy.name(), "custom_name");
+    }
+
+    #[test]
+    fn high_weight_overrides_count() {
+        // One short with weight 100 vs three longs with weight 1
+        let strategy = CompositeStrategy::new("weight_test")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysShort), 100.0)
+            .add(Box::new(AlwaysLong), 1.0)
+            .add(Box::new(AlwaysLong), 1.0)
+            .add(Box::new(AlwaysLong), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterShort);
+    }
+
+    #[test]
+    fn exit_long_action_passthrough() {
+        let strategy = CompositeStrategy::new("exit_test")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysExitLong), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::ExitLong);
+    }
+
+    #[test]
+    fn signal_confidence_is_bounded() {
+        let strategy = CompositeStrategy::new("bounded")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysLong), 1.0);
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert!(signal.confidence >= 0.0 && signal.confidence <= 1.0);
+    }
+
+    #[test]
+    fn min_confidence_1_0_filters_everything() {
+        let strategy = CompositeStrategy::new("strict")
+            .with_min_confidence(1.0)
+            .add(Box::new(AlwaysLong), 1.0)
+            .add(Box::new(AlwaysShort), 1.0);
+        let candles = vec![dummy_candle()];
+        // With two strategies voting differently, no single action can have 100% confidence
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
 }

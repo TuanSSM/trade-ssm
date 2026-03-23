@@ -198,4 +198,92 @@ mod tests {
         let result = sma(&candles, period);
         assert_eq!(result.len(), candles.len() - period + 1);
     }
+
+    #[test]
+    fn test_ema_convergence_over_many_candles() {
+        // EMA should converge toward the constant value after enough candles
+        // Start with varying prices, then switch to constant 200
+        let mut candles: Vec<Candle> = (0..10)
+            .map(|i| candle_close(&format!("{}", 100 + i * 10)))
+            .collect();
+        // Add 100 candles at constant price 200
+        for _ in 0..100 {
+            candles.push(candle_close("200"));
+        }
+        let result = ema(&candles, 10);
+        assert!(!result.is_empty());
+        // Last EMA value should be very close to 200
+        let last = *result.last().unwrap();
+        let diff = (last - Decimal::from(200)).abs();
+        assert!(
+            diff < Decimal::new(1, 2), // less than 0.01
+            "EMA should converge to 200 after many constant candles, got {last}"
+        );
+    }
+
+    #[test]
+    fn test_ema_period_1_matches_close() {
+        // EMA with period=1: multiplier = 2/(1+1) = 1.0
+        // EMA[0] = SMA(1) = first close
+        // EMA[i] = close * 1 + prev * 0 = close
+        let candles = vec![
+            candle_close("100"),
+            candle_close("150"),
+            candle_close("120"),
+            candle_close("180"),
+            candle_close("90"),
+        ];
+        let result = ema(&candles, 1);
+        assert_eq!(result.len(), 5);
+        // Each EMA value should equal the close price
+        assert_eq!(result[0], Decimal::from(100));
+        assert_eq!(result[1], Decimal::from(150));
+        assert_eq!(result[2], Decimal::from(120));
+        assert_eq!(result[3], Decimal::from(180));
+        assert_eq!(result[4], Decimal::from(90));
+    }
+
+    #[test]
+    fn test_ema_lags_behind_trend() {
+        // In an uptrend, EMA should lag behind (be less than current close)
+        let candles: Vec<_> = (0..20)
+            .map(|i| candle_close(&format!("{}", 100 + i * 5)))
+            .collect();
+        let result = ema(&candles, 5);
+        assert!(!result.is_empty());
+        // Last EMA should be less than last close
+        let last_close = candles.last().unwrap().close;
+        let last_ema = *result.last().unwrap();
+        assert!(
+            last_ema < last_close,
+            "EMA should lag behind in uptrend: ema={last_ema}, close={last_close}"
+        );
+    }
+
+    #[test]
+    fn test_ema_step_response() {
+        // Start at 100, then jump to 200 — EMA should gradually approach 200
+        let mut candles: Vec<Candle> = (0..10).map(|_| candle_close("100")).collect();
+        for _ in 0..10 {
+            candles.push(candle_close("200"));
+        }
+        let result = ema(&candles, 5);
+        assert!(!result.is_empty());
+        // First value (SMA of first 5 at 100) should be 100
+        assert_eq!(result[0], Decimal::from(100));
+        // Values after the step should monotonically increase
+        let step_idx = 5; // result index where 200s start influencing
+        for i in step_idx + 1..result.len() {
+            assert!(
+                result[i] >= result[i - 1],
+                "EMA should monotonically increase after step: idx {i}"
+            );
+        }
+        // Last value should be close to 200
+        let last = *result.last().unwrap();
+        assert!(
+            last > Decimal::from(190),
+            "EMA should approach 200 after step, got {last}"
+        );
+    }
 }

@@ -198,4 +198,77 @@ mod tests {
             assert!(*val > Decimal::ZERO, "ATR must be positive, got {val}");
         }
     }
+
+    #[test]
+    fn test_atr_trending_market_increasing() {
+        // Increasing volatility: each candle has a wider range
+        let candles: Vec<_> = (0..25)
+            .map(|i| {
+                let base = 100 + i * 2;
+                let spread = 2 + i; // increasing range
+                candle_ohlc(
+                    &format!("{}", base),
+                    &format!("{}", base + spread),
+                    &format!("{}", base - spread),
+                    &format!("{}", base + 1),
+                )
+            })
+            .collect();
+        let result = atr(&candles, 5);
+        assert!(result.len() >= 2);
+        // ATR should generally increase as volatility grows
+        let first = result[0];
+        let last = *result.last().unwrap();
+        assert!(
+            last > first,
+            "ATR should increase with rising volatility: first={first}, last={last}"
+        );
+    }
+
+    #[test]
+    fn test_atr_declining_volatility() {
+        // Decreasing volatility: range shrinks over time
+        let candles: Vec<_> = (0..25)
+            .map(|i| {
+                let base = 100;
+                let spread = 20i64 - i as i64; // spread from 20 down to ~0
+                let spread = spread.max(1); // keep at least 1
+                candle_ohlc(
+                    &format!("{}", base),
+                    &format!("{}", base as i64 + spread),
+                    &format!("{}", base as i64 - spread),
+                    &format!("{}", base),
+                )
+            })
+            .collect();
+        let result = atr(&candles, 5);
+        assert!(result.len() >= 2);
+        let first = result[0];
+        let last = *result.last().unwrap();
+        assert!(
+            last < first,
+            "ATR should decrease with declining volatility: first={first}, last={last}"
+        );
+    }
+
+    #[test]
+    fn test_atr_gap_up_true_range() {
+        // Test that gaps are captured by true range (not just high-low)
+        let candles = vec![
+            candle_ohlc("100", "110", "90", "105"),   // normal
+            candle_ohlc("100", "110", "90", "100"),    // normal
+            candle_ohlc("100", "110", "90", "100"),    // close at 100
+            candle_ohlc("130", "140", "125", "135"),   // gap up: low(125) > prev_close(100)
+        ];
+        // With period=2, we need > 2 candles
+        let result = atr(&candles, 2);
+        assert!(!result.is_empty());
+        // The last TR should include the gap: |high(140) - prev_close(100)| = 40
+        // which is larger than high-low = 15
+        let last = *result.last().unwrap();
+        assert!(
+            last > Decimal::from(15),
+            "ATR should capture the gap, got {last}"
+        );
+    }
 }

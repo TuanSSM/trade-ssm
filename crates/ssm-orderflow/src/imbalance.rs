@@ -328,4 +328,175 @@ mod tests {
         // taker_buy_volume > 0, sell_ratio = 0/100 = 0 < min_ratio
         assert!(zones.is_empty());
     }
+
+    #[test]
+    fn zero_sell_volume_only_no_imbalance() {
+        // buy_volume == 0, sell_volume > 0
+        // sell_volume > 0 so buy_ratio = 0/sell_vol = 0 < min_ratio
+        // buy_volume == 0 so sell_ratio check skipped
+        let candles = vec![candle_vol("0", "100")];
+        let config = ImbalanceConfig::default();
+        let zones = detect_imbalances(&candles, &config);
+        assert!(zones.is_empty());
+    }
+
+    #[test]
+    fn balanced_volume_no_imbalance() {
+        // Various nearly balanced candles
+        let candles = vec![
+            candle_vol("50", "50"),
+            candle_vol("48", "52"),
+            candle_vol("51", "49"),
+            candle_vol("45", "55"),
+        ];
+        let config = ImbalanceConfig {
+            min_ratio: Decimal::from(2),
+            stacked_threshold: 1,
+        };
+        let zones = detect_imbalances(&candles, &config);
+        assert!(zones.is_empty(), "balanced volumes should produce no imbalances");
+    }
+
+    #[test]
+    fn extreme_buy_imbalance_ratio() {
+        // 1000:1 buy imbalance
+        let candles = vec![candle_vol("1000", "1")];
+        let config = ImbalanceConfig::default();
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].zone_type, ImbalanceType::BuyImbalance);
+        assert_eq!(zones[0].ratio, Decimal::from(1000));
+        assert_eq!(zones[0].dominant_volume, Decimal::from(1000));
+        assert_eq!(zones[0].weak_volume, Decimal::from(1));
+    }
+
+    #[test]
+    fn extreme_sell_imbalance_ratio() {
+        // 1000:1 sell imbalance
+        let candles = vec![candle_vol("1", "1000")];
+        let config = ImbalanceConfig::default();
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].zone_type, ImbalanceType::SellImbalance);
+        assert_eq!(zones[0].ratio, Decimal::from(1000));
+        assert_eq!(zones[0].dominant_volume, Decimal::from(1000));
+        assert_eq!(zones[0].weak_volume, Decimal::from(1));
+    }
+
+    #[test]
+    fn just_below_ratio_threshold_sell_side() {
+        // sell/buy ratio just below 3 => no sell imbalance
+        // buy/sell ratio also below 3 => no buy imbalance
+        let candles = vec![candle_vol("36", "100")]; // sell_ratio = 100/36 = 2.777...
+        let config = ImbalanceConfig {
+            min_ratio: Decimal::from(3),
+            stacked_threshold: 1,
+        };
+        let zones = detect_imbalances(&candles, &config);
+        assert!(zones.is_empty());
+    }
+
+    #[test]
+    fn stacked_imbalances_exactly_at_min_stack() {
+        // 3 consecutive buy imbalances with stacked_threshold=3
+        let candles: Vec<_> = (0..3).map(|_| candle_vol("90", "10")).collect();
+        let config = ImbalanceConfig {
+            min_ratio: Decimal::from(3),
+            stacked_threshold: 3,
+        };
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 3);
+        let stacks = detect_stacked_imbalances(&zones, 3);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].count, 3);
+    }
+
+    #[test]
+    fn stacked_imbalances_below_min_stack() {
+        // 2 consecutive buy imbalances with min_stack=3
+        let candles: Vec<_> = (0..2).map(|_| candle_vol("90", "10")).collect();
+        let config = ImbalanceConfig::default();
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 2);
+        let stacks = detect_stacked_imbalances(&zones, 3);
+        assert!(stacks.is_empty(), "2 zones should not form stack with min_stack=3");
+    }
+
+    #[test]
+    fn two_separate_stacks() {
+        // Buy stack (0,1,2), then a gap (3 = balanced), then sell stack (4,5,6)
+        let candles = vec![
+            candle_vol("90", "10"),  // 0: buy
+            candle_vol("90", "10"),  // 1: buy
+            candle_vol("90", "10"),  // 2: buy
+            candle_vol("50", "50"),  // 3: balanced (no imbalance)
+            candle_vol("10", "90"),  // 4: sell
+            candle_vol("10", "90"),  // 5: sell
+            candle_vol("10", "90"),  // 6: sell
+        ];
+        let config = ImbalanceConfig {
+            min_ratio: Decimal::from(3),
+            stacked_threshold: 3,
+        };
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 6); // 3 buy + 3 sell
+        let stacks = detect_stacked_imbalances(&zones, 3);
+        assert_eq!(stacks.len(), 2);
+        assert_eq!(stacks[0].zone_type, ImbalanceType::BuyImbalance);
+        assert_eq!(stacks[1].zone_type, ImbalanceType::SellImbalance);
+    }
+
+    #[test]
+    fn single_zone_with_min_stack_one() {
+        // min_stack=1 means a single zone qualifies as a stack
+        let zones = vec![ImbalanceZone {
+            index: 5,
+            zone_type: ImbalanceType::SellImbalance,
+            ratio: Decimal::from(4),
+            dominant_volume: Decimal::from(80),
+            weak_volume: Decimal::from(20),
+        }];
+        let stacks = detect_stacked_imbalances(&zones, 1);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].start_index, 5);
+        assert_eq!(stacks[0].count, 1);
+    }
+
+    #[test]
+    fn buy_imbalance_takes_priority_over_sell_check() {
+        // When buy_ratio >= min_ratio, the continue skips the sell check
+        // buy=90, sell=10, buy_ratio=9 >= 3, so BuyImbalance, sell check never runs
+        let candles = vec![candle_vol("90", "10")];
+        let config = ImbalanceConfig {
+            min_ratio: Decimal::from(3),
+            stacked_threshold: 1,
+        };
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].zone_type, ImbalanceType::BuyImbalance);
+    }
+
+    #[test]
+    fn many_candles_mixed_imbalances() {
+        // Test with many candles, some with buy imbalance, some sell, some balanced
+        let candles = vec![
+            candle_vol("80", "20"),  // buy ratio 4
+            candle_vol("50", "50"),  // balanced
+            candle_vol("20", "80"),  // sell ratio 4
+            candle_vol("50", "50"),  // balanced
+            candle_vol("90", "10"),  // buy ratio 9
+        ];
+        let config = ImbalanceConfig {
+            min_ratio: Decimal::from(3),
+            stacked_threshold: 1,
+        };
+        let zones = detect_imbalances(&candles, &config);
+        assert_eq!(zones.len(), 3);
+        assert_eq!(zones[0].zone_type, ImbalanceType::BuyImbalance);
+        assert_eq!(zones[0].index, 0);
+        assert_eq!(zones[1].zone_type, ImbalanceType::SellImbalance);
+        assert_eq!(zones[1].index, 2);
+        assert_eq!(zones[2].zone_type, ImbalanceType::BuyImbalance);
+        assert_eq!(zones[2].index, 4);
+    }
 }

@@ -110,4 +110,178 @@ mod tests {
         let strategy = AiStrategy::new(Box::new(StubModel), 5).with_min_confidence(0.8);
         assert!((strategy.min_confidence - 0.8).abs() < f64::EPSILON);
     }
+
+    /// A model that always predicts EnterLong.
+    struct AlwaysLongModel;
+    impl AIModel for AlwaysLongModel {
+        fn name(&self) -> &str {
+            "always_long"
+        }
+        fn predict(&self, _features: &ssm_core::FeatureRow) -> anyhow::Result<AIAction> {
+            Ok(AIAction::EnterLong)
+        }
+        fn train(
+            &mut self,
+            data: &[ssm_core::FeatureRow],
+        ) -> anyhow::Result<ssm_ai::model::TrainMetrics> {
+            Ok(ssm_ai::model::TrainMetrics {
+                model_name: "always_long".into(),
+                samples: data.len(),
+                accuracy: 1.0,
+                loss: 0.0,
+            })
+        }
+        fn save(&self, _path: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn load(&mut self, _path: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A model that always predicts EnterShort.
+    struct AlwaysShortModel;
+    impl AIModel for AlwaysShortModel {
+        fn name(&self) -> &str {
+            "always_short"
+        }
+        fn predict(&self, _features: &ssm_core::FeatureRow) -> anyhow::Result<AIAction> {
+            Ok(AIAction::EnterShort)
+        }
+        fn train(
+            &mut self,
+            data: &[ssm_core::FeatureRow],
+        ) -> anyhow::Result<ssm_ai::model::TrainMetrics> {
+            Ok(ssm_ai::model::TrainMetrics {
+                model_name: "always_short".into(),
+                samples: data.len(),
+                accuracy: 1.0,
+                loss: 0.0,
+            })
+        }
+        fn save(&self, _path: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn load(&mut self, _path: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A model that always predicts ExitLong.
+    struct ExitLongModel;
+    impl AIModel for ExitLongModel {
+        fn name(&self) -> &str {
+            "exit_long_model"
+        }
+        fn predict(&self, _features: &ssm_core::FeatureRow) -> anyhow::Result<AIAction> {
+            Ok(AIAction::ExitLong)
+        }
+        fn train(
+            &mut self,
+            data: &[ssm_core::FeatureRow],
+        ) -> anyhow::Result<ssm_ai::model::TrainMetrics> {
+            Ok(ssm_ai::model::TrainMetrics {
+                model_name: "exit_long_model".into(),
+                samples: data.len(),
+                accuracy: 1.0,
+                loss: 0.0,
+            })
+        }
+        fn save(&self, _path: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn load(&mut self, _path: &std::path::Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn enter_long_model_produces_enter_long_signal() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterLong);
+    }
+
+    #[test]
+    fn enter_short_model_produces_enter_short_signal() {
+        let strategy = AiStrategy::new(Box::new(AlwaysShortModel), 5);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterShort);
+    }
+
+    #[test]
+    fn exit_long_model_produces_exit_long_signal() {
+        let strategy = AiStrategy::new(Box::new(ExitLongModel), 5);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::ExitLong);
+    }
+
+    #[test]
+    fn name_returns_model_name() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        assert_eq!(strategy.name(), "always_long");
+    }
+
+    #[test]
+    fn signal_source_includes_ai_prefix() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.source, "ai:always_long");
+    }
+
+    #[test]
+    fn signal_confidence_is_one() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert!((signal.confidence - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn insufficient_candles_for_large_window() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 50);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn exact_minimum_candles_produces_signal() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        let candles: Vec<_> = (0..5).map(|_| dummy_candle()).collect();
+        let result = strategy.analyze(&candles).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn one_fewer_than_minimum_returns_none() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        let candles: Vec<_> = (0..4).map(|_| dummy_candle()).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_candles_returns_none() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        assert!(strategy.analyze(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn signal_timestamp_from_last_candle() {
+        let strategy = AiStrategy::new(Box::new(AlwaysLongModel), 5);
+        let candles: Vec<_> = (0..10).map(|_| dummy_candle()).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.timestamp, 1000); // close_time from dummy_candle
+    }
+
+    #[test]
+    fn neutral_model_returns_none_with_sufficient_candles() {
+        // StubModel always returns Neutral, so even with enough candles we get None
+        let strategy = AiStrategy::new(Box::new(StubModel), 5);
+        let candles: Vec<_> = (0..50).map(|_| dummy_candle()).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
 }

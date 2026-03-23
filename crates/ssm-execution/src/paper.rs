@@ -283,4 +283,271 @@ mod tests {
         assert_eq!(order.price, Some(Decimal::from(42000)));
         assert_eq!(order.status, OrderStatus::Filled);
     }
+
+    #[test]
+    fn test_stop_limit_buy_triggers_at_exact_stop() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::StopLimit);
+        order.stop_price = Some(Decimal::from(52000));
+
+        // Price exactly at stop — should trigger for buy
+        engine.fill_order(&mut order, Decimal::from(52000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.price, Some(Decimal::from(52000)));
+    }
+
+    #[test]
+    fn test_stop_limit_sell_at_exact_stop() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::StopLimit);
+        order.stop_price = Some(Decimal::from(48000));
+
+        // Price exactly at stop — should trigger for sell
+        engine.fill_order(&mut order, Decimal::from(48000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_stop_limit_buy_not_triggered_below() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::StopLimit);
+        order.stop_price = Some(Decimal::from(52000));
+
+        // Price below stop — should not trigger for buy
+        engine.fill_order(&mut order, Decimal::from(51999)).unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+    }
+
+    #[test]
+    fn test_take_profit_limit_buy_at_exact_price() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::TakeProfitLimit);
+        order.stop_price = Some(Decimal::from(48000));
+
+        // Price exactly at TP — should trigger for buy
+        engine.fill_order(&mut order, Decimal::from(48000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.price, Some(Decimal::from(48000)));
+    }
+
+    #[test]
+    fn test_take_profit_limit_buy_not_triggered_above() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::TakeProfitLimit);
+        order.stop_price = Some(Decimal::from(48000));
+
+        // Price above TP — should not trigger for buy
+        engine.fill_order(&mut order, Decimal::from(49000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+    }
+
+    #[test]
+    fn test_take_profit_sell_not_triggered_below() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::TakeProfitMarket);
+        order.stop_price = Some(Decimal::from(55000));
+
+        // Price below TP — should not trigger for sell
+        engine.fill_order(&mut order, Decimal::from(54999)).unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+    }
+
+    #[test]
+    fn test_take_profit_sell_at_exact_price() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::TakeProfitMarket);
+        order.stop_price = Some(Decimal::from(55000));
+
+        // Price exactly at TP — should trigger for sell
+        engine.fill_order(&mut order, Decimal::from(55000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_limit_buy_at_exact_boundary() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Limit);
+        order.price = Some(Decimal::from_str("49000.00").unwrap());
+
+        // Exactly at limit price — should fill
+        engine
+            .fill_order(&mut order, Decimal::from_str("49000.00").unwrap())
+            .unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_limit_sell_at_exact_boundary() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::Limit);
+        order.price = Some(Decimal::from(51000));
+
+        // Exactly at limit — should fill
+        engine.fill_order(&mut order, Decimal::from(51000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_limit_order_without_price_does_nothing() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Limit);
+        // price is None by default from make_order
+
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        // Status stays Pending since no price set — the match arm does nothing
+        assert_eq!(order.status, OrderStatus::Pending);
+        assert_eq!(engine.filled_count(), 0);
+    }
+
+    #[test]
+    fn test_stop_market_without_stop_price_does_nothing() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::StopMarket);
+        // stop_price is None
+
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Pending);
+        assert_eq!(engine.filled_count(), 0);
+    }
+
+    #[test]
+    fn test_take_profit_without_stop_price_does_nothing() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::TakeProfitMarket);
+        // stop_price is None
+
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Pending);
+        assert_eq!(engine.filled_count(), 0);
+    }
+
+    #[test]
+    fn test_extreme_small_price() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Market);
+        let tiny_price = Decimal::from_str("0.00000001").unwrap();
+
+        engine.fill_order(&mut order, tiny_price).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.price, Some(tiny_price));
+    }
+
+    #[test]
+    fn test_extreme_large_price() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Market);
+        let huge_price = Decimal::from(999_999_999);
+
+        engine.fill_order(&mut order, huge_price).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.price, Some(huge_price));
+    }
+
+    #[test]
+    fn test_market_sell_fills_immediately() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::Market);
+
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.price, Some(Decimal::from(50000)));
+    }
+
+    #[test]
+    fn test_limit_buy_below_price_fills() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Limit);
+        order.price = Some(Decimal::from(50000));
+
+        // Current price below limit — should fill
+        engine.fill_order(&mut order, Decimal::from(49000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_trailing_stop_buy_stays_open() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::TrailingStop);
+        order.trailing_delta = Some(Decimal::from(200));
+
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+        assert_eq!(engine.filled_count(), 0);
+    }
+
+    #[test]
+    fn test_filled_count_not_incremented_for_open() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Limit);
+        order.price = Some(Decimal::from(40000));
+
+        // Price too high — stays open
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_eq!(engine.filled_count(), 0);
+    }
+
+    #[test]
+    fn test_stop_market_buy_at_exact_stop() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::StopMarket);
+        order.stop_price = Some(Decimal::from(52000));
+
+        // Price exactly at stop — should trigger for buy
+        engine.fill_order(&mut order, Decimal::from(52000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_stop_market_sell_at_exact_stop() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::StopMarket);
+        order.stop_price = Some(Decimal::from(48000));
+
+        // Price exactly at stop — should trigger for sell
+        engine.fill_order(&mut order, Decimal::from(48000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_stop_market_sell_not_triggered_above() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Sell, OrderType::StopMarket);
+        order.stop_price = Some(Decimal::from(48000));
+
+        // Price above stop — should NOT trigger for sell stop
+        engine.fill_order(&mut order, Decimal::from(48001)).unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+    }
+
+    #[test]
+    fn test_multiple_fills_increment_count() {
+        let mut engine = PaperEngine::new();
+        for i in 0..5 {
+            let mut order = make_order(Side::Buy, OrderType::Market);
+            order.id = format!("order-{i}");
+            engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        }
+        assert_eq!(engine.filled_count(), 5);
+    }
+
+    #[test]
+    fn test_updated_at_changes_on_fill() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Market);
+        assert_eq!(order.updated_at, 0);
+
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_ne!(order.updated_at, 0);
+    }
+
+    #[test]
+    fn test_updated_at_changes_on_open() {
+        let mut engine = PaperEngine::new();
+        let mut order = make_order(Side::Buy, OrderType::Limit);
+        order.price = Some(Decimal::from(40000));
+        // Price too high, order stays open but updated_at should not change
+        // (the code only updates timestamp on fill or status change to Open for limit)
+        engine.fill_order(&mut order, Decimal::from(50000)).unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+    }
 }

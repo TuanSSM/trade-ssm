@@ -304,4 +304,136 @@ mod tests {
         let profile = build_profile(&candles, Decimal::from(1));
         assert_eq!(profile.poc, Decimal::from(100));
     }
+
+    #[test]
+    fn single_candle_zero_range_profile() {
+        // Candle with high == low: single level, all volume there
+        let candles = vec![candle_range("500", "500", "120")];
+        let profile = build_profile(&candles, Decimal::from(10));
+        assert_eq!(profile.levels.len(), 1);
+        assert_eq!(profile.poc, Decimal::from(500));
+        assert_eq!(profile.total_volume, Decimal::from(120));
+        assert_eq!(profile.vah, Decimal::from(500));
+        assert_eq!(profile.val, Decimal::from(500));
+    }
+
+    #[test]
+    fn value_area_covers_at_least_70_pct() {
+        // Build a wider profile and verify VA covers >= 70% of volume
+        let candles: Vec<_> = (0..50)
+            .map(|i| {
+                let base = 100 + (i % 20);
+                candle_range(&format!("{}", base), &format!("{}", base + 5), "100")
+            })
+            .collect();
+        let profile = build_profile(&candles, Decimal::from(1));
+        // Sum volume in VA range
+        let va_volume: Decimal = profile
+            .levels
+            .iter()
+            .filter(|l| l.price >= profile.val && l.price <= profile.vah)
+            .map(|l| l.volume)
+            .sum();
+        let target = profile.total_volume * Decimal::new(70, 2);
+        assert!(
+            va_volume >= target,
+            "VA volume ({}) should be >= 70% of total ({})",
+            va_volume,
+            target
+        );
+    }
+
+    #[test]
+    fn two_candles_different_ranges_tpo_count() {
+        // Two candles overlapping at level 100: TPO count should be 2 there
+        let candles = vec![
+            candle_range("100", "102", "30"),
+            candle_range("99", "100", "20"),
+        ];
+        let profile = build_profile(&candles, Decimal::from(1));
+        let level_100 = profile.levels.iter().find(|l| l.price == Decimal::from(100));
+        assert!(level_100.is_some(), "level 100 should exist");
+        assert_eq!(level_100.unwrap().tpo_count, 2, "two candles touch level 100");
+    }
+
+    #[test]
+    fn levels_sorted_by_price() {
+        let candles = vec![
+            candle_range("200", "210", "50"),
+            candle_range("100", "110", "50"),
+        ];
+        let profile = build_profile(&candles, Decimal::from(5));
+        for i in 1..profile.levels.len() {
+            assert!(
+                profile.levels[i].price > profile.levels[i - 1].price,
+                "levels should be sorted ascending by price"
+            );
+        }
+    }
+
+    #[test]
+    fn calculate_value_area_empty_levels() {
+        let (vah, val) = calculate_value_area(&[], Decimal::ZERO, Decimal::ZERO);
+        assert_eq!(vah, Decimal::ZERO);
+        assert_eq!(val, Decimal::ZERO);
+    }
+
+    #[test]
+    fn calculate_value_area_zero_total_volume() {
+        let levels = vec![ProfileLevel {
+            price: Decimal::from(100),
+            tpo_count: 1,
+            volume: Decimal::ZERO,
+        }];
+        let (vah, val) = calculate_value_area(&levels, Decimal::from(100), Decimal::ZERO);
+        assert_eq!(vah, Decimal::ZERO);
+        assert_eq!(val, Decimal::ZERO);
+    }
+
+    #[test]
+    fn profile_with_concentrated_volume() {
+        // Most volume at one price, small amounts elsewhere
+        // POC should be at the high-volume level, VA should be narrow
+        let candles = vec![
+            candle_range("100", "100", "1000"), // huge volume at 100
+            candle_range("90", "110", "10"),     // spread thinly
+        ];
+        let profile = build_profile(&candles, Decimal::from(1));
+        assert_eq!(profile.poc, Decimal::from(100));
+        // VA should be relatively narrow since 1000 out of 1010 is at level 100
+        assert!(
+            profile.vah - profile.val <= Decimal::from(5),
+            "VA should be narrow with concentrated volume"
+        );
+    }
+
+    #[test]
+    fn profile_with_uniform_volume() {
+        // Equal volume at all levels - VA should be wide
+        let candles: Vec<_> = (0..10)
+            .map(|i| candle_range(&format!("{}", 100 + i), &format!("{}", 100 + i), "100"))
+            .collect();
+        let profile = build_profile(&candles, Decimal::from(1));
+        assert_eq!(profile.levels.len(), 10);
+        assert_eq!(profile.total_volume, Decimal::from(1000));
+        // VA needs to cover 70% = 700, so at least 7 levels
+        let va_levels = profile
+            .levels
+            .iter()
+            .filter(|l| l.price >= profile.val && l.price <= profile.vah)
+            .count();
+        assert!(va_levels >= 7, "VA should cover at least 7 of 10 uniform levels, got {}", va_levels);
+    }
+
+    #[test]
+    fn fractional_tick_size_profile() {
+        let candles = vec![candle_range("100.0", "100.5", "60")];
+        let profile = build_profile(&candles, Decimal::from_str("0.1").unwrap());
+        // Range from 100.0 to 100.5 with tick 0.1 = 6 levels
+        assert_eq!(profile.levels.len(), 6);
+        // Volume distributed equally: 60/6 = 10 per level
+        for level in &profile.levels {
+            assert_eq!(level.volume, Decimal::from(10));
+        }
+    }
 }

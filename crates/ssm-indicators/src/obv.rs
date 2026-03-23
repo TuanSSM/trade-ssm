@@ -139,4 +139,67 @@ mod tests {
         let result = obv(&candles);
         assert_eq!(result.len(), candles.len());
     }
+
+    #[test]
+    fn test_obv_alternating_up_down() {
+        let candles = vec![
+            candle_cv("100", "1000"),
+            candle_cv("110", "500"),  // up: +500
+            candle_cv("100", "500"),  // down: +500 - 500 = 0
+            candle_cv("110", "500"),  // up: 0 + 500 = +500
+            candle_cv("100", "500"),  // down: +500 - 500 = 0
+        ];
+        let result = obv(&candles);
+        assert_eq!(result[0], Decimal::ZERO);
+        assert_eq!(result[1], Decimal::from(500));
+        assert_eq!(result[2], Decimal::ZERO);
+        assert_eq!(result[3], Decimal::from(500));
+        assert_eq!(result[4], Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_obv_zero_volume() {
+        let candles = vec![
+            candle_cv("100", "0"),
+            candle_cv("110", "0"),  // up but zero volume => +0
+            candle_cv("105", "0"),  // down but zero volume => -0
+        ];
+        let result = obv(&candles);
+        assert_eq!(result.len(), 3);
+        for val in &result {
+            assert_eq!(*val, Decimal::ZERO, "OBV should be 0 with zero volume");
+        }
+    }
+
+    #[test]
+    fn test_obv_alternating_with_different_volumes() {
+        let candles = vec![
+            candle_cv("100", "1000"),
+            candle_cv("110", "2000"),  // up: +2000
+            candle_cv("105", "500"),   // down: +2000 - 500 = +1500
+            candle_cv("108", "1000"),  // up: +1500 + 1000 = +2500
+            candle_cv("107", "300"),   // down: +2500 - 300 = +2200
+        ];
+        let result = obv(&candles);
+        assert_eq!(result[0], Decimal::ZERO);
+        assert_eq!(result[1], Decimal::from(2000));
+        assert_eq!(result[2], Decimal::from(1500));
+        assert_eq!(result[3], Decimal::from(2500));
+        assert_eq!(result[4], Decimal::from(2200));
+    }
+
+    #[test]
+    fn test_obv_multiple_flat_candles() {
+        // All same close => OBV stays at 0
+        let candles = vec![
+            candle_cv("100", "1000"),
+            candle_cv("100", "2000"),
+            candle_cv("100", "500"),
+            candle_cv("100", "800"),
+        ];
+        let result = obv(&candles);
+        for val in &result {
+            assert_eq!(*val, Decimal::ZERO, "OBV should be 0 for flat prices");
+        }
+    }
 }
