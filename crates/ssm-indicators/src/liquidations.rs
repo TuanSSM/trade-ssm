@@ -164,4 +164,65 @@ mod tests {
         assert_eq!(s.total_short_liquidations, 0);
         assert_eq!(s.bias, LiquidationBias::Balanced);
     }
+
+    #[test]
+    fn test_short_bias() {
+        let liqs = vec![
+            liq("BUY", "50000", "1.0"),  // $50k short liq
+            liq("BUY", "50000", "0.5"),  // $25k short liq
+            liq("SELL", "50000", "0.1"), // $5k long liq
+        ];
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_short_liquidations, 2);
+        assert_eq!(s.total_long_liquidations, 1);
+        assert_eq!(s.bias, LiquidationBias::ShortsLiquidated);
+    }
+
+    #[test]
+    fn test_balanced_bias() {
+        let liqs = vec![
+            liq("SELL", "50000", "1.0"), // $50k long liq
+            liq("BUY", "50000", "1.0"),  // $50k short liq
+        ];
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.bias, LiquidationBias::Balanced);
+    }
+
+    #[test]
+    fn test_liquidation_bias_display() {
+        assert_eq!(
+            LiquidationBias::LongsLiquidated.to_string(),
+            "LONGS REKT (bearish)"
+        );
+        assert_eq!(
+            LiquidationBias::ShortsLiquidated.to_string(),
+            "SHORTS REKT (bullish)"
+        );
+        assert_eq!(LiquidationBias::Balanced.to_string(), "BALANCED");
+    }
+
+    #[test]
+    fn test_sub_threshold_liquidations() {
+        // All below $1K → no tier counts (classify returns None)
+        let liqs = vec![
+            liq("SELL", "100", "0.5"),  // $50
+            liq("BUY", "200", "1.0"),   // $200
+        ];
+        let s = analyze_liquidations(&liqs);
+        for tier in &s.by_tier {
+            assert_eq!(tier.long_count, 0, "No long tier counts for sub-threshold");
+            assert_eq!(tier.short_count, 0, "No short tier counts for sub-threshold");
+        }
+    }
+
+    #[test]
+    fn test_all_tiers_populated() {
+        // by_tier should always have 4 entries regardless of data
+        let s = analyze_liquidations(&[]);
+        assert_eq!(s.by_tier.len(), 4);
+        assert_eq!(s.by_tier[0].tier, LiquidationTier::Small);
+        assert_eq!(s.by_tier[1].tier, LiquidationTier::Medium);
+        assert_eq!(s.by_tier[2].tier, LiquidationTier::Large);
+        assert_eq!(s.by_tier[3].tier, LiquidationTier::Massive);
+    }
 }

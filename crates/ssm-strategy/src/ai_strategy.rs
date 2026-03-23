@@ -97,4 +97,17 @@ mod tests {
         let strategy = AiStrategy::new(Box::new(StubModel), 5);
         assert_eq!(strategy.name(), "stub");
     }
+
+    #[test]
+    fn test_insufficient_candles() {
+        let strategy = AiStrategy::new(Box::new(StubModel), 20);
+        let candles: Vec<_> = (0..5).map(|_| dummy_candle()).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_min_confidence_setter() {
+        let strategy = AiStrategy::new(Box::new(StubModel), 5).with_min_confidence(0.8);
+        assert!((strategy.min_confidence - 0.8).abs() < f64::EPSILON);
+    }
 }

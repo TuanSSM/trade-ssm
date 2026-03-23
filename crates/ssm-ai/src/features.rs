@@ -152,4 +152,117 @@ mod tests {
         let features = extract_features(&[], 15);
         assert!(features.is_empty());
     }
+
+    #[test]
+    fn single_candle_features() {
+        let candles = vec![candle_at("100", "60", "40")];
+        let features = extract_features(&candles, 5);
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].features.len(), 10);
+        // open/base_price = 100/100 = 1.0
+        assert!((features[0].features[0] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn extract_features_deterministic() {
+        let candles: Vec<_> = (0..20).map(|_| candle_at("50000", "60", "40")).collect();
+        let a = extract_features(&candles, 15);
+        let b = extract_features(&candles, 15);
+        assert_eq!(a.len(), b.len());
+        for (fa, fb) in a.iter().zip(b.iter()) {
+            for (va, vb) in fa.features.iter().zip(fb.features.iter()) {
+                assert!((va - vb).abs() < f64::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn label_features_with_horizon_beyond_data() {
+        let candles = vec![
+            candle_at("100", "50", "50"),
+            candle_at("110", "50", "50"),
+        ];
+        let mut features = extract_features(&candles, 2);
+        // horizon=10 is larger than data, so no labels should be set
+        label_features(&mut features, &candles, 10);
+        for f in &features {
+            assert_eq!(f.label, None);
+        }
+    }
+
+    #[test]
+    fn label_features_price_decrease() {
+        let candles = vec![
+            candle_at("110", "50", "50"),
+            candle_at("100", "50", "50"), // price went down
+            candle_at("90", "50", "50"),
+        ];
+        let mut features = extract_features(&candles, 3);
+        label_features(&mut features, &candles, 1);
+        // First: 110 -> 100, price decreased
+        assert_eq!(features[0].label, Some(-1.0));
+    }
+
+    #[test]
+    fn zero_volume_buy_sell_ratio() {
+        // candle with zero volume
+        let c = Candle {
+            open_time: 0,
+            open: Decimal::from(100),
+            high: Decimal::from(105),
+            low: Decimal::from(95),
+            close: Decimal::from(100),
+            volume: Decimal::ZERO,
+            close_time: 1000,
+            quote_volume: Decimal::ZERO,
+            trades: 0,
+            taker_buy_volume: Decimal::ZERO,
+            taker_sell_volume: Decimal::ZERO,
+        };
+        let features = extract_features(&[c], 1);
+        assert_eq!(features.len(), 1);
+        // With zero volume, buy_sell_ratio defaults to 0.5
+        assert!((features[0].features[5] - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn price_change_pct_computed_correctly() {
+        // open=100, close=100 (since candle_at uses close for both open and close)
+        // price_change_pct = close/open - 1 = 0.0
+        let candles = vec![candle_at("100", "50", "50")];
+        let features = extract_features(&candles, 1);
+        // price_change_pct is feature index 8
+        assert!((features[0].features[8] - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn range_pct_computed_correctly() {
+        // candle_at sets high = close+5, low = close-5, open = close
+        // range_pct = (high - low) / open = 10 / 100 = 0.1
+        let candles = vec![candle_at("100", "50", "50")];
+        let features = extract_features(&candles, 1);
+        // range_pct is feature index 9
+        assert!((features[0].features[9] - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn cvd_window_larger_than_candles() {
+        // cvd_window=100 but only 5 candles: should return all 5
+        let candles: Vec<_> = (0..5).map(|_| candle_at("100", "60", "40")).collect();
+        let features = extract_features(&candles, 100);
+        assert_eq!(features.len(), 5);
+    }
+
+    #[test]
+    fn label_features_all_flat_prices() {
+        let candles: Vec<_> = (0..10).map(|_| candle_at("100", "50", "50")).collect();
+        let mut features = extract_features(&candles, 10);
+        label_features(&mut features, &candles, 1);
+        // All candles have same close price, so all labels should be 0.0
+        // except the last one which has no future
+        for f in &features[..features.len() - 1] {
+            assert_eq!(f.label, Some(0.0), "flat prices should produce label 0.0");
+        }
+        assert_eq!(features.last().unwrap().label, None);
+    }
 }

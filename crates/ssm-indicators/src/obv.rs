@@ -98,4 +98,45 @@ mod tests {
             assert_eq!(r_short[i], r_long[i], "OBV repainting at {i}");
         }
     }
+
+    #[test]
+    fn test_obv_empty() {
+        let result = obv(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_obv_single_candle() {
+        let candles = vec![candle_cv("100", "1000")];
+        let result = obv(&candles);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_obv_mixed_trend() {
+        let candles = vec![
+            candle_cv("100", "1000"),
+            candle_cv("110", "500"),  // up → +500
+            candle_cv("105", "300"),  // down → +500 - 300 = +200
+            candle_cv("115", "800"),  // up → +200 + 800 = +1000
+        ];
+        let result = obv(&candles);
+        assert_eq!(result[0], Decimal::ZERO);
+        assert_eq!(result[1], Decimal::from(500));
+        assert_eq!(result[2], Decimal::from(200));
+        assert_eq!(result[3], Decimal::from(1000));
+    }
+
+    #[test]
+    fn test_obv_output_length() {
+        let candles = vec![
+            candle_cv("100", "1000"),
+            candle_cv("105", "500"),
+            candle_cv("110", "300"),
+            candle_cv("108", "200"),
+        ];
+        let result = obv(&candles);
+        assert_eq!(result.len(), candles.len());
+    }
 }

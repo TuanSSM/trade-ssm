@@ -163,4 +163,29 @@ mod tests {
         assert_eq!(sig.len(), 64);
         assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn test_sign_deterministic() {
+        let engine = LiveEngine::new("api_key".into(), "secret_key".into());
+        let sig1 = engine.sign("same_message");
+        let sig2 = engine.sign("same_message");
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_sign_different_keys() {
+        let engine1 = LiveEngine::new("api_key".into(), "secret_one".into());
+        let engine2 = LiveEngine::new("api_key".into(), "secret_two".into());
+        let sig1 = engine1.sign("test_message");
+        let sig2 = engine2.sign("test_message");
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_sign_different_messages() {
+        let engine = LiveEngine::new("api_key".into(), "secret_key".into());
+        let sig1 = engine.sign("message_one");
+        let sig2 = engine.sign("message_two");
+        assert_ne!(sig1, sig2);
+    }
 }

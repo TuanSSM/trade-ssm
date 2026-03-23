@@ -143,4 +143,100 @@ mod tests {
         assert!(fp.rows.is_empty());
         assert_eq!(fp.total_delta, Decimal::ZERO);
     }
+
+    #[test]
+    fn zero_tick_size_uses_exact_price() {
+        let mut builder = FootprintBuilder::new(Decimal::ZERO, 0, 59999);
+        builder.add_trade(&trade("50050", "1.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50051", "2.0", ssm_core::Side::Buy));
+
+        let fp = builder.build();
+        // Each exact price is its own level
+        assert_eq!(fp.rows.len(), 2);
+    }
+
+    #[test]
+    fn single_trade_footprint() {
+        let mut builder = FootprintBuilder::new(Decimal::from(10), 100, 200);
+        builder.add_trade(&trade("50005", "3.5", ssm_core::Side::Sell));
+
+        let fp = builder.build();
+        assert_eq!(fp.rows.len(), 1);
+        assert_eq!(fp.total_bid_volume, Decimal::from_str("3.5").unwrap());
+        assert_eq!(fp.total_ask_volume, Decimal::ZERO);
+        assert_eq!(fp.total_delta, Decimal::from_str("-3.5").unwrap()); // negative delta (net selling)
+        assert_eq!(fp.open_time, 100);
+        assert_eq!(fp.close_time, 200);
+    }
+
+    #[test]
+    fn multiple_trades_same_level_aggregate() {
+        let mut builder = FootprintBuilder::new(Decimal::from(100), 0, 0);
+        // All bucket to 50000
+        builder.add_trade(&trade("50010", "1.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50020", "2.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50030", "0.5", ssm_core::Side::Sell));
+
+        let fp = builder.build();
+        assert_eq!(fp.rows.len(), 1); // all in same bucket
+        assert_eq!(fp.rows[0].ask_volume, Decimal::from_str("3.0").unwrap());
+        assert_eq!(fp.rows[0].bid_volume, Decimal::from_str("0.5").unwrap());
+        assert_eq!(fp.rows[0].delta, Decimal::from_str("2.5").unwrap());
+    }
+
+    #[test]
+    fn footprint_rows_sorted_by_price() {
+        let mut builder = FootprintBuilder::new(Decimal::from(100), 0, 0);
+        builder.add_trade(&trade("50200", "1.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50000", "1.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50100", "1.0", ssm_core::Side::Buy));
+
+        let fp = builder.build();
+        assert_eq!(fp.rows.len(), 3);
+        // BTreeMap ensures sorted order
+        assert!(fp.rows[0].price_level < fp.rows[1].price_level);
+        assert!(fp.rows[1].price_level < fp.rows[2].price_level);
+    }
+
+    #[test]
+    fn mixed_buy_sell_same_level_delta_correct() {
+        // Multiple buys and sells at the same price level
+        let mut builder = FootprintBuilder::new(Decimal::from(100), 0, 0);
+        builder.add_trade(&trade("50050", "2.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50050", "3.0", ssm_core::Side::Sell));
+        builder.add_trade(&trade("50050", "1.5", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50050", "0.5", ssm_core::Side::Sell));
+
+        let fp = builder.build();
+        assert_eq!(fp.rows.len(), 1);
+        // ask (buy) = 2.0 + 1.5 = 3.5, bid (sell) = 3.0 + 0.5 = 3.5
+        assert_eq!(fp.rows[0].ask_volume, Decimal::from_str("3.5").unwrap());
+        assert_eq!(fp.rows[0].bid_volume, Decimal::from_str("3.5").unwrap());
+        assert_eq!(fp.rows[0].delta, Decimal::ZERO);
+        assert_eq!(fp.total_delta, Decimal::ZERO);
+    }
+
+    #[test]
+    fn bucket_with_fractional_tick_size() {
+        // tick_size = 0.5
+        let builder = FootprintBuilder::new(Decimal::from_str("0.5").unwrap(), 0, 0);
+        assert_eq!(builder.bucket(Decimal::from_str("100.3").unwrap()), Decimal::from_str("100.0").unwrap());
+        assert_eq!(builder.bucket(Decimal::from_str("100.5").unwrap()), Decimal::from_str("100.5").unwrap());
+        assert_eq!(builder.bucket(Decimal::from_str("100.9").unwrap()), Decimal::from_str("100.5").unwrap());
+    }
+
+    #[test]
+    fn total_volumes_match_sum_of_rows() {
+        let mut builder = FootprintBuilder::new(Decimal::from(100), 0, 0);
+        builder.add_trade(&trade("50050", "1.0", ssm_core::Side::Buy));
+        builder.add_trade(&trade("50150", "2.0", ssm_core::Side::Sell));
+        builder.add_trade(&trade("50250", "3.0", ssm_core::Side::Buy));
+
+        let fp = builder.build();
+        let sum_bid: Decimal = fp.rows.iter().map(|r| r.bid_volume).sum();
+        let sum_ask: Decimal = fp.rows.iter().map(|r| r.ask_volume).sum();
+        assert_eq!(fp.total_bid_volume, sum_bid);
+        assert_eq!(fp.total_ask_volume, sum_ask);
+        assert_eq!(fp.total_delta, sum_ask - sum_bid);
+    }
 }

@@ -190,4 +190,64 @@ mod tests {
         let candles = vec![dummy_candle()];
         assert!(strategy.analyze(&candles).unwrap().is_none());
     }
+
+    #[test]
+    fn test_composite_name() {
+        let strategy = CompositeStrategy::new("my_composite");
+        assert_eq!(strategy.name(), "my_composite");
+    }
+
+    #[test]
+    fn test_single_strategy() {
+        let strategy = CompositeStrategy::new("single")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysLong), 1.0);
+
+        let candles = vec![dummy_candle()];
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.action, AIAction::EnterLong);
+    }
+
+    #[test]
+    fn test_empty_candles_returns_none() {
+        let strategy = CompositeStrategy::new("test")
+            .with_min_confidence(0.0)
+            .add(Box::new(AlwaysLong), 1.0);
+
+        let candles: Vec<Candle> = vec![];
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    struct WeakLong;
+    impl Strategy for WeakLong {
+        fn name(&self) -> &str {
+            "weak_long"
+        }
+        fn analyze(&self, candles: &[Candle]) -> Result<Option<Signal>> {
+            if candles.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(Signal {
+                timestamp: 0,
+                symbol: "TEST".into(),
+                action: AIAction::EnterLong,
+                confidence: 0.1,
+                source: "weak_long".into(),
+                metadata: Default::default(),
+            }))
+        }
+    }
+
+    #[test]
+    fn test_confidence_threshold() {
+        // WeakLong + AlwaysShort: long vote is small relative to total,
+        // high min_confidence filters out the winner
+        let strategy = CompositeStrategy::new("test")
+            .with_min_confidence(0.99)
+            .add(Box::new(WeakLong), 1.0)
+            .add(Box::new(AlwaysShort), 1.0);
+
+        let candles = vec![dummy_candle()];
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
 }

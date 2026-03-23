@@ -137,4 +137,65 @@ mod tests {
 
         assert_eq!(r_short[0], r_long[0], "EMA repainting");
     }
+
+    #[test]
+    fn test_sma_single_period() {
+        let candles = vec![
+            candle_close("10"),
+            candle_close("20"),
+            candle_close("30"),
+        ];
+        let result = sma(&candles, 1);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], Decimal::from(10));
+        assert_eq!(result[1], Decimal::from(20));
+        assert_eq!(result[2], Decimal::from(30));
+    }
+
+    #[test]
+    fn test_sma_period_equals_len() {
+        let candles = vec![
+            candle_close("10"),
+            candle_close("20"),
+            candle_close("30"),
+        ];
+        let result = sma(&candles, 3);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], Decimal::from(20)); // (10+20+30)/3
+    }
+
+    #[test]
+    fn test_sma_zero_period() {
+        let candles = vec![candle_close("10"), candle_close("20")];
+        let result = sma(&candles, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_ema_zero_period() {
+        let candles = vec![candle_close("10"), candle_close("20")];
+        let result = ema(&candles, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_ema_converges() {
+        // Constant price of 100 → EMA should converge to 100
+        let candles: Vec<_> = (0..50).map(|_| candle_close("100")).collect();
+        let result = ema(&candles, 10);
+        assert!(!result.is_empty());
+        for val in &result {
+            assert_eq!(*val, Decimal::from(100));
+        }
+    }
+
+    #[test]
+    fn test_sma_output_length() {
+        let candles: Vec<_> = (0..10)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let period = 4;
+        let result = sma(&candles, period);
+        assert_eq!(result.len(), candles.len() - period + 1);
+    }
 }

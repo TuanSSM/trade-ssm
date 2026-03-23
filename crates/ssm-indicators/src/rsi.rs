@@ -150,4 +150,38 @@ mod tests {
             .collect();
         assert!(rsi(&candles, 14).is_empty());
     }
+
+    #[test]
+    fn test_rsi_flat_market() {
+        // Constant price → no gains, no losses → RSI should be 50
+        let candles: Vec<_> = (0..20).map(|_| candle_close("100")).collect();
+        let result = rsi(&candles, 14);
+        assert!(!result.is_empty());
+        for val in &result {
+            let v = val.to_f64().unwrap();
+            assert!(
+                (v - 50.0).abs() < 0.01,
+                "RSI for flat market should be 50, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rsi_output_length() {
+        let candles: Vec<_> = (0..30)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let period = 14;
+        let result = rsi(&candles, period);
+        assert_eq!(result.len(), candles.len() - period);
+    }
+
+    #[test]
+    fn test_rsi_zero_period() {
+        let candles: Vec<_> = (0..10)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let result = rsi(&candles, 0);
+        assert!(result.is_empty());
+    }
 }

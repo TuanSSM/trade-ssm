@@ -156,4 +156,44 @@ mod tests {
             assert_eq!(r_short.middle[i], r_long.middle[i], "BB repainting at {i}");
         }
     }
+
+    #[test]
+    fn test_bollinger_insufficient_data() {
+        let candles: Vec<_> = (0..10).map(|_| candle_close("100")).collect();
+        let bb = bollinger_bands(&candles, 20, Decimal::from(2));
+        assert!(bb.middle.is_empty());
+        assert!(bb.upper.is_empty());
+        assert!(bb.lower.is_empty());
+        assert!(bb.pct_b.is_empty());
+        assert!(bb.bandwidth.is_empty());
+    }
+
+    #[test]
+    fn test_bollinger_output_length() {
+        let candles: Vec<_> = (0..30)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let bb = bollinger_bands(&candles, 20, Decimal::from(2));
+        assert_eq!(bb.upper.len(), bb.middle.len());
+        assert_eq!(bb.lower.len(), bb.middle.len());
+        assert_eq!(bb.pct_b.len(), bb.middle.len());
+        assert_eq!(bb.bandwidth.len(), bb.middle.len());
+    }
+
+    #[test]
+    fn test_bollinger_upper_above_lower() {
+        let candles: Vec<_> = (0..30)
+            .map(|i| candle_close(&format!("{}", 100 + (i % 10))))
+            .collect();
+        let bb = bollinger_bands(&candles, 20, Decimal::from(2));
+        assert!(!bb.upper.is_empty());
+        for i in 0..bb.upper.len() {
+            assert!(
+                bb.upper[i] >= bb.lower[i],
+                "Upper band {} should be >= lower band {} at index {i}",
+                bb.upper[i],
+                bb.lower[i]
+            );
+        }
+    }
 }

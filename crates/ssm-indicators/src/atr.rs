@@ -128,4 +128,74 @@ mod tests {
             assert_eq!(r_short[i], r_long[i], "ATR repainting at {i}");
         }
     }
+
+    #[test]
+    fn test_atr_insufficient_data() {
+        let candles: Vec<_> = (0..5)
+            .map(|i| {
+                candle_ohlc(
+                    &format!("{}", 100 + i),
+                    &format!("{}", 105 + i),
+                    &format!("{}", 95 + i),
+                    &format!("{}", 102 + i),
+                )
+            })
+            .collect();
+        let result = atr(&candles, 14);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_atr_zero_period() {
+        let candles: Vec<_> = (0..10)
+            .map(|i| {
+                candle_ohlc(
+                    &format!("{}", 100 + i),
+                    &format!("{}", 105 + i),
+                    &format!("{}", 95 + i),
+                    &format!("{}", 102 + i),
+                )
+            })
+            .collect();
+        let result = atr(&candles, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_atr_output_length() {
+        let candles: Vec<_> = (0..20)
+            .map(|i| {
+                candle_ohlc(
+                    &format!("{}", 100 + i),
+                    &format!("{}", 108 + i),
+                    &format!("{}", 95 + i),
+                    &format!("{}", 103 + i),
+                )
+            })
+            .collect();
+        let period = 14;
+        let result = atr(&candles, period);
+        // true_ranges has len candles.len()-1 = 19, ATR output = 19 - 14 + 1 = 6
+        assert_eq!(result.len(), candles.len() - 1 - period + 1);
+    }
+
+    #[test]
+    fn test_atr_all_positive() {
+        let candles: Vec<_> = (0..30)
+            .map(|i| {
+                let base = 100 + (i as i64 % 10) * 3;
+                candle_ohlc(
+                    &format!("{}", base),
+                    &format!("{}", base + 7),
+                    &format!("{}", base - 4),
+                    &format!("{}", base + 2),
+                )
+            })
+            .collect();
+        let result = atr(&candles, 14);
+        assert!(!result.is_empty());
+        for val in &result {
+            assert!(*val > Decimal::ZERO, "ATR must be positive, got {val}");
+        }
+    }
 }

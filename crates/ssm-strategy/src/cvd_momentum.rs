@@ -124,4 +124,46 @@ mod tests {
         // Very small CVD — below absurd threshold
         assert!(strategy.analyze(&candles).unwrap().is_none());
     }
+
+    #[test]
+    fn test_strategy_name() {
+        let strategy = CvdMomentumStrategy::new(5);
+        assert_eq!(strategy.name(), "cvd_momentum");
+    }
+
+    #[test]
+    fn test_neutral_cvd_returns_none() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let candles: Vec<_> = (0..10).map(|_| candle("50", "50")).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_confidence_is_bounded() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let candles: Vec<_> = (0..10).map(|_| candle("80", "20")).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert!(signal.confidence >= 0.0 && signal.confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_signal_source() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let candles: Vec<_> = (0..10).map(|_| candle("80", "20")).collect();
+        let signal = strategy.analyze(&candles).unwrap().unwrap();
+        assert_eq!(signal.source, "cvd_momentum");
+    }
+
+    #[test]
+    fn test_different_window_sizes() {
+        let candles: Vec<_> = (0..25).map(|_| candle("80", "20")).collect();
+
+        let strategy_small = CvdMomentumStrategy::new(3).with_min_confidence(0.0);
+        let result_small = strategy_small.analyze(&candles).unwrap();
+        assert!(result_small.is_some());
+
+        let strategy_large = CvdMomentumStrategy::new(20).with_min_confidence(0.0);
+        let result_large = strategy_large.analyze(&candles).unwrap();
+        assert!(result_large.is_some());
+    }
 }

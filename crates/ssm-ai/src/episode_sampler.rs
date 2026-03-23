@@ -149,4 +149,41 @@ mod tests {
         let window = sampler.sample(&candles, 42);
         assert_eq!(window.len(), 5);
     }
+
+    #[test]
+    fn min_length_clamped_to_ten() {
+        // min_length of 1 should be clamped to 10
+        let sampler = EpisodeSampler::new(1, 200);
+        let candles: Vec<_> = (0..100).map(candle_at).collect();
+        for seed in 0..50 {
+            let window = sampler.sample(&candles, seed);
+            assert!(window.len() >= 10, "min_length should be clamped to 10");
+        }
+    }
+
+    #[test]
+    fn min_equals_max_length() {
+        let sampler = EpisodeSampler::new(50, 50);
+        let candles: Vec<_> = (0..1000).map(candle_at).collect();
+        for seed in 0..20 {
+            let window = sampler.sample(&candles, seed);
+            assert_eq!(window.len(), 50, "fixed length should always be 50");
+        }
+    }
+
+    #[test]
+    fn sample_batch_correct_count() {
+        let candles: Vec<_> = (0..1000).map(candle_at).collect();
+        let sampler = EpisodeSampler::new(50, 200);
+        let batch = sampler.sample_batch(&candles, 5, 42);
+        assert_eq!(batch.len(), 5);
+    }
+
+    #[test]
+    fn sample_batch_zero_episodes() {
+        let candles: Vec<_> = (0..100).map(candle_at).collect();
+        let sampler = EpisodeSampler::new(50, 200);
+        let batch = sampler.sample_batch(&candles, 0, 42);
+        assert!(batch.is_empty());
+    }
 }

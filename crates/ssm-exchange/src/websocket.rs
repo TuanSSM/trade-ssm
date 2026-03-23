@@ -381,4 +381,78 @@ mod tests {
         assert!(url.contains("ethusdt@forceOrder"));
         assert!(url.contains("ethusdt@kline_1h"));
     }
+
+    #[test]
+    fn test_invalid_json_returns_none() {
+        let result = parse_combined_stream("this is not json at all");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_missing_stream_field_returns_none() {
+        let json = r#"{ "data": { "e": "aggTrade", "s": "BTCUSDT", "p": "50000", "q": "1", "T": 123, "m": false } }"#;
+        assert!(parse_combined_stream(json).is_none());
+    }
+
+    #[test]
+    fn test_missing_data_field_returns_none() {
+        let json = r#"{ "stream": "btcusdt@aggTrade" }"#;
+        assert!(parse_combined_stream(json).is_none());
+    }
+
+    #[test]
+    fn test_kline_taker_sell_volume() {
+        let json = r#"{
+            "stream": "btcusdt@kline_15m",
+            "data": {
+                "e": "kline",
+                "k": {
+                    "t": 1000000, "T": 1899999,
+                    "o": "50000", "h": "51000", "l": "49000", "c": "50500",
+                    "v": "250.0", "q": "12500000", "n": 8000,
+                    "V": "150.0", "x": true
+                }
+            }
+        }"#;
+        let event = parse_combined_stream(json).unwrap();
+        match event {
+            WsEvent::Kline(c) => {
+                // taker_sell_volume = volume - taker_buy_volume = 250.0 - 150.0 = 100.0
+                assert_eq!(c.volume, Decimal::from_str("250.0").unwrap());
+                assert_eq!(c.taker_buy_volume, Decimal::from_str("150.0").unwrap());
+                assert_eq!(c.taker_sell_volume, Decimal::from_str("100.0").unwrap());
+                assert_eq!(c.taker_sell_volume, c.volume - c.taker_buy_volume);
+            }
+            _ => panic!("expected Kline event"),
+        }
+    }
+
+    #[test]
+    fn test_stream_url_lowercases_symbol() {
+        let client = BinanceWsClient::new(WsConfig {
+            symbol: "BTCUSDT".to_string(),
+            kline_interval: "15m".to_string(),
+            ..Default::default()
+        });
+        let url = client.stream_url();
+        assert!(url.contains("btcusdt@aggTrade"));
+        assert!(url.contains("btcusdt@forceOrder"));
+        assert!(url.contains("btcusdt@kline_15m"));
+        // Should NOT contain uppercase
+        assert!(!url.contains("BTCUSDT"));
+    }
+
+    #[test]
+    fn test_ws_config_custom() {
+        let cfg = WsConfig {
+            symbol: "ETHUSDT".to_string(),
+            kline_interval: "1h".to_string(),
+            max_reconnects: 5,
+            reconnect_base_ms: 2000,
+        };
+        assert_eq!(cfg.symbol, "ETHUSDT");
+        assert_eq!(cfg.kline_interval, "1h");
+        assert_eq!(cfg.max_reconnects, 5);
+        assert_eq!(cfg.reconnect_base_ms, 2000);
+    }
 }

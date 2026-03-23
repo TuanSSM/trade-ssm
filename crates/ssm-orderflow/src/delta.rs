@@ -170,4 +170,108 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn empty_candles_returns_empty_analysis() {
+        let analysis = analyze_delta(&[], 5);
+        assert!(analysis.candle_deltas.is_empty());
+        assert!(analysis.cumulative_delta.is_empty());
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn single_candle_no_divergence() {
+        let candles = vec![candle("100", "70", "30")];
+        let analysis = analyze_delta(&candles, 2);
+        assert_eq!(analysis.candle_deltas.len(), 1);
+        assert_eq!(analysis.candle_deltas[0], Decimal::from(40));
+        assert_eq!(analysis.cumulative_delta[0], Decimal::from(40));
+        // lookback=2 but only 1 candle, so no divergences possible
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn lookback_of_one_produces_no_divergences() {
+        // lookback < 2 should produce no divergences per the guard condition
+        let candles = vec![
+            candle("100", "70", "30"),
+            candle("110", "30", "70"),
+        ];
+        let analysis = analyze_delta(&candles, 1);
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn lookback_of_zero_produces_no_divergences() {
+        let candles = vec![candle("100", "60", "40"), candle("101", "70", "30")];
+        let analysis = analyze_delta(&candles, 0);
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn no_divergence_when_price_and_delta_move_same_direction() {
+        // Both price and delta go up — no divergence
+        let candles = vec![
+            candle("100", "60", "40"), // delta +20
+            candle("101", "70", "30"), // delta +40, cum +60
+            candle("105", "80", "20"), // delta +60, cum +120 — price up, delta up
+        ];
+        let analysis = analyze_delta(&candles, 2);
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn lookback_larger_than_candle_count_produces_no_divergences() {
+        let candles = vec![
+            candle("100", "60", "40"),
+            candle("101", "70", "30"),
+        ];
+        // lookback=5 but only 2 candles: guard `candles.len() >= lookback` fails
+        let analysis = analyze_delta(&candles, 5);
+        assert_eq!(analysis.candle_deltas.len(), 2);
+        assert_eq!(analysis.cumulative_delta.len(), 2);
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn flat_price_change_no_divergence() {
+        // Price unchanged across lookback window — no divergence even if delta moves
+        let candles = vec![
+            candle("100", "60", "40"), // delta +20
+            candle("100", "70", "30"), // delta +40, cum +60
+            candle("100", "80", "20"), // same price, delta up — price_change == 0
+        ];
+        let analysis = analyze_delta(&candles, 2);
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn flat_delta_change_no_divergence() {
+        // Delta unchanged but price moves — no divergence (delta_change == 0)
+        let candles = vec![
+            candle("100", "50", "50"), // delta 0, cum 0
+            candle("101", "50", "50"), // delta 0, cum 0
+            candle("105", "50", "50"), // delta 0, cum 0 — price up, delta flat
+        ];
+        let analysis = analyze_delta(&candles, 2);
+        assert!(analysis.divergences.is_empty());
+    }
+
+    #[test]
+    fn multiple_divergences_detected_in_sequence() {
+        // Multiple bearish divergences across a longer series
+        let candles = vec![
+            candle("100", "70", "30"), // delta +40, cum +40
+            candle("101", "60", "40"), // delta +20, cum +60
+            candle("105", "30", "70"), // delta -40, cum +20 — price up 4, delta down 40
+            candle("108", "25", "75"), // delta -50, cum -30 — price up 7, delta down 90
+            candle("112", "20", "80"), // delta -60, cum -90 — price up 7, delta down 110
+        ];
+        let analysis = analyze_delta(&candles, 2);
+        // Indices 2, 3, 4 are all in the divergence scan window
+        assert!(analysis.divergences.len() >= 2, "expected multiple divergences, got {}", analysis.divergences.len());
+        for d in &analysis.divergences {
+            assert_eq!(d.divergence_type, DivergenceType::Bearish);
+        }
+    }
 }

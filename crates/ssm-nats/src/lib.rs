@@ -40,4 +40,35 @@ mod tests {
         assert_eq!(topics::trades("BTCUSDT"), "ssm.trades.btcusdt");
         assert_eq!(topics::candles("BTCUSDT", "15m"), "ssm.candles.btcusdt.15m");
     }
+
+    #[test]
+    fn all_topic_functions_accessible_from_lib() {
+        // Verify all topic functions are reachable through the public module
+        let _ = topics::trades("BTCUSDT");
+        let _ = topics::candles("BTCUSDT", "1h");
+        let _ = topics::liquidations("BTCUSDT");
+        let _ = topics::signals("BTCUSDT");
+        let _ = topics::orders("BTCUSDT");
+        let _ = topics::positions("BTCUSDT");
+        let _ = topics::metrics("analyzer");
+    }
+
+    #[test]
+    fn topics_return_consistent_prefix() {
+        // All topics should start with "ssm."
+        assert!(topics::trades("X").starts_with("ssm."));
+        assert!(topics::candles("X", "1m").starts_with("ssm."));
+        assert!(topics::liquidations("X").starts_with("ssm."));
+        assert!(topics::signals("X").starts_with("ssm."));
+        assert!(topics::orders("X").starts_with("ssm."));
+        assert!(topics::positions("X").starts_with("ssm."));
+        assert!(topics::metrics("x").starts_with("ssm."));
+    }
+
+    #[test]
+    fn publisher_and_subscriber_types_exported() {
+        // Verify that Publisher and Subscriber are re-exported from lib
+        fn _assert_pub_export(_: Publisher) {}
+        fn _assert_sub_export(_: Subscriber) {}
+    }
 }

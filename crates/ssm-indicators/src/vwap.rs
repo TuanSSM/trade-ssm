@@ -108,4 +108,27 @@ mod tests {
         let result = vwap(&[]);
         assert!(result.vwap.is_empty());
     }
+
+    #[test]
+    fn test_vwap_output_length() {
+        let candles = vec![
+            candle_hlcv("110", "90", "100", "1000"),
+            candle_hlcv("115", "95", "105", "500"),
+            candle_hlcv("120", "100", "110", "800"),
+        ];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), candles.len());
+    }
+
+    #[test]
+    fn test_vwap_constant_price() {
+        let candles: Vec<_> = (0..10)
+            .map(|_| candle_hlcv("100", "100", "100", "500"))
+            .collect();
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), 10);
+        for val in &result.vwap {
+            assert_eq!(*val, Decimal::from(100), "VWAP should equal constant price");
+        }
+    }
 }

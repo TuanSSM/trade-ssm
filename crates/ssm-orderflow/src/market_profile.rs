@@ -227,4 +227,81 @@ mod tests {
         assert!(profile.poc >= profile.val);
         assert!(profile.poc <= profile.vah);
     }
+
+    #[test]
+    fn zero_tick_size_returns_empty_profile() {
+        let candles = vec![candle_range("100", "110", "100")];
+        let profile = build_profile(&candles, Decimal::ZERO);
+        assert!(profile.levels.is_empty());
+        assert_eq!(profile.total_volume, Decimal::ZERO);
+    }
+
+    #[test]
+    fn single_candle_profile() {
+        let candles = vec![candle_range("100", "105", "50")];
+        let profile = build_profile(&candles, Decimal::from(1));
+        assert!(!profile.levels.is_empty());
+        // Volume may have tiny rounding due to distribution across levels
+        let diff = (profile.total_volume - Decimal::from(50)).abs();
+        assert!(diff < Decimal::new(1, 10), "total_volume should be ~50, got {}", profile.total_volume);
+        // POC must be within the candle's range
+        assert!(profile.poc >= Decimal::from(100));
+        assert!(profile.poc <= Decimal::from(105));
+    }
+
+    #[test]
+    fn vah_gte_val() {
+        // Value Area High should always be >= Value Area Low
+        let candles = vec![
+            candle_range("90", "110", "100"),
+            candle_range("95", "115", "200"),
+            candle_range("100", "120", "150"),
+        ];
+        let profile = build_profile(&candles, Decimal::from(5));
+        assert!(profile.vah >= profile.val, "VAH ({}) must be >= VAL ({})", profile.vah, profile.val);
+    }
+
+    #[test]
+    fn single_tick_candle_all_volume_at_one_level() {
+        // Candle where high == low — all volume at one level
+        let candles = vec![candle_range("100", "100", "75")];
+        let profile = build_profile(&candles, Decimal::from(1));
+        assert_eq!(profile.levels.len(), 1);
+        assert_eq!(profile.poc, Decimal::from(100));
+        assert_eq!(profile.total_volume, Decimal::from(75));
+    }
+
+    #[test]
+    fn large_tick_size_fewer_levels() {
+        // With a large tick size, multiple prices collapse into fewer levels
+        let candles = vec![candle_range("100", "110", "100")];
+        let profile_fine = build_profile(&candles, Decimal::from(1));
+        let profile_coarse = build_profile(&candles, Decimal::from(5));
+        assert!(
+            profile_coarse.levels.len() <= profile_fine.levels.len(),
+            "coarser tick should produce equal or fewer levels"
+        );
+    }
+
+    #[test]
+    fn total_volume_preserved_across_levels() {
+        // Total volume across all levels should equal sum of input candle volumes
+        let candles = vec![
+            candle_range("100", "110", "60"),
+            candle_range("105", "115", "40"),
+        ];
+        let profile = build_profile(&candles, Decimal::from(5));
+        assert_eq!(profile.total_volume, Decimal::from(100));
+    }
+
+    #[test]
+    fn poc_is_level_with_max_volume() {
+        // Concentrate volume at one spot and verify POC
+        let candles = vec![
+            candle_range("100", "100", "200"), // all at level 100
+            candle_range("200", "200", "10"),  // small at 200
+        ];
+        let profile = build_profile(&candles, Decimal::from(1));
+        assert_eq!(profile.poc, Decimal::from(100));
+    }
 }

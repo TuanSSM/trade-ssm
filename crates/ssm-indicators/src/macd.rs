@@ -150,4 +150,48 @@ mod tests {
             assert_eq!(r_short.macd[i], r_long.macd[i], "MACD repainting at {i}");
         }
     }
+
+    #[test]
+    fn test_macd_downtrend_negative() {
+        let candles: Vec<_> = (0..50)
+            .map(|i| candle_close(&format!("{}", 200 - i * 2)))
+            .collect();
+        let result = macd(&candles, 12, 26, 9);
+        let last_macd = result.macd.last().unwrap();
+        assert!(
+            *last_macd < Decimal::ZERO,
+            "MACD should be negative in downtrend, got {last_macd}"
+        );
+    }
+
+    #[test]
+    fn test_macd_histogram_equals_diff() {
+        let candles: Vec<_> = (0..50)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let result = macd(&candles, 12, 26, 9);
+        assert!(!result.histogram.is_empty());
+        // histogram[i] = macd[offset+i] - signal[i]
+        let hist_offset = result.macd.len() - result.signal.len();
+        for i in 0..result.histogram.len() {
+            assert_eq!(
+                result.histogram[i],
+                result.macd[hist_offset + i] - result.signal[i],
+                "Histogram mismatch at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_macd_signal_length() {
+        let candles: Vec<_> = (0..50)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let signal_period = 9;
+        let result = macd(&candles, 12, 26, signal_period);
+        assert_eq!(
+            result.signal.len(),
+            result.macd.len() - signal_period + 1
+        );
+    }
 }

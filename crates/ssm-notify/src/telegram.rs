@@ -156,4 +156,131 @@ mod tests {
         assert!(report.contains("$30K+"));
         assert!(report.contains("1 orders"));
     }
+
+    #[test]
+    fn test_format_report_bearish() {
+        let cvd = CvdAnalysis {
+            deltas: vec![Decimal::from(-10)],
+            cumulative: vec![Decimal::from(-10)],
+            total_cvd: Decimal::from(-10),
+            trend: CvdTrend::Bearish,
+            window_size: 1,
+        };
+        let liq = LiquidationSummary {
+            total_long_liquidations: 0,
+            total_short_liquidations: 0,
+            total_long_value: Decimal::ZERO,
+            total_short_value: Decimal::ZERO,
+            by_tier: vec![],
+            bias: LiquidationBias::Balanced,
+        };
+        let report = format_report("BTCUSDT", "15m", &cvd, &liq);
+        assert!(report.contains("BEARISH"));
+        assert!(report.contains("\u{1f534}")); // 🔴
+    }
+
+    #[test]
+    fn test_format_report_neutral() {
+        let cvd = CvdAnalysis {
+            deltas: vec![],
+            cumulative: vec![],
+            total_cvd: Decimal::ZERO,
+            trend: CvdTrend::Neutral,
+            window_size: 0,
+        };
+        let liq = LiquidationSummary {
+            total_long_liquidations: 0,
+            total_short_liquidations: 0,
+            total_long_value: Decimal::ZERO,
+            total_short_value: Decimal::ZERO,
+            by_tier: vec![],
+            bias: LiquidationBias::Balanced,
+        };
+        let report = format_report("BTCUSDT", "15m", &cvd, &liq);
+        assert!(report.contains("NEUTRAL"));
+    }
+
+    #[test]
+    fn test_format_report_shorts_rekt() {
+        let cvd = CvdAnalysis {
+            deltas: vec![],
+            cumulative: vec![],
+            total_cvd: Decimal::ZERO,
+            trend: CvdTrend::Neutral,
+            window_size: 0,
+        };
+        let liq = LiquidationSummary {
+            total_long_liquidations: 0,
+            total_short_liquidations: 5,
+            total_long_value: Decimal::ZERO,
+            total_short_value: Decimal::from(100_000),
+            by_tier: vec![],
+            bias: LiquidationBias::ShortsLiquidated,
+        };
+        let report = format_report("BTCUSDT", "15m", &cvd, &liq);
+        assert!(report.contains("SHORTS REKT"));
+    }
+
+    #[test]
+    fn test_format_report_includes_interval() {
+        let cvd = CvdAnalysis {
+            deltas: vec![],
+            cumulative: vec![],
+            total_cvd: Decimal::ZERO,
+            trend: CvdTrend::Neutral,
+            window_size: 0,
+        };
+        let liq = LiquidationSummary {
+            total_long_liquidations: 0,
+            total_short_liquidations: 0,
+            total_long_value: Decimal::ZERO,
+            total_short_value: Decimal::ZERO,
+            by_tier: vec![],
+            bias: LiquidationBias::Balanced,
+        };
+        let report = format_report("BTCUSDT", "4h", &cvd, &liq);
+        assert!(report.contains("4h"));
+    }
+
+    #[test]
+    fn test_format_report_empty_tiers() {
+        let cvd = CvdAnalysis {
+            deltas: vec![],
+            cumulative: vec![],
+            total_cvd: Decimal::ZERO,
+            trend: CvdTrend::Neutral,
+            window_size: 0,
+        };
+        let liq = LiquidationSummary {
+            total_long_liquidations: 0,
+            total_short_liquidations: 0,
+            total_long_value: Decimal::ZERO,
+            total_short_value: Decimal::ZERO,
+            by_tier: vec![],
+            bias: LiquidationBias::Balanced,
+        };
+        let report = format_report("BTCUSDT", "15m", &cvd, &liq);
+        assert!(!report.contains("Tiers:"));
+    }
+
+    #[test]
+    fn test_format_report_date() {
+        let cvd = CvdAnalysis {
+            deltas: vec![],
+            cumulative: vec![],
+            total_cvd: Decimal::ZERO,
+            trend: CvdTrend::Neutral,
+            window_size: 0,
+        };
+        let liq = LiquidationSummary {
+            total_long_liquidations: 0,
+            total_short_liquidations: 0,
+            total_long_value: Decimal::ZERO,
+            total_short_value: Decimal::ZERO,
+            by_tier: vec![],
+            bias: LiquidationBias::Balanced,
+        };
+        let report = format_report("BTCUSDT", "15m", &cvd, &liq);
+        assert!(report.contains("UTC"));
+    }
 }

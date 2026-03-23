@@ -50,4 +50,22 @@ mod tests {
         assert_eq!(s.name(), "dummy");
         assert!(s.analyze(&[]).unwrap().is_none());
     }
+
+    #[test]
+    fn test_train_result_fields() {
+        let result = TrainResult {
+            epochs: 100,
+            final_metric: 0.95,
+            metric_name: "accuracy".to_string(),
+        };
+        assert_eq!(result.epochs, 100);
+        assert!((result.final_metric - 0.95).abs() < f64::EPSILON);
+        assert_eq!(result.metric_name, "accuracy");
+    }
+
+    #[test]
+    fn test_dummy_strategy_name() {
+        let s = DummyStrategy;
+        assert_eq!(s.name(), "dummy");
+    }
 }

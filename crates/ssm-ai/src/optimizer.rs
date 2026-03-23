@@ -401,4 +401,99 @@ mod tests {
         // Results should be sorted descending by objective
         assert!(results[0].objective >= results[1].objective);
     }
+
+    #[test]
+    fn objective_parse_all_variants() {
+        assert!(matches!(Objective::parse("TotalReturn"), Some(Objective::TotalReturn)));
+        assert!(matches!(Objective::parse("SharpeRatio"), Some(Objective::SharpeRatio)));
+        assert!(matches!(Objective::parse("ProfitFactor"), Some(Objective::ProfitFactor)));
+        assert!(matches!(Objective::parse("WinRate"), Some(Objective::WinRate)));
+        assert!(Objective::parse("Invalid").is_none());
+        assert!(Objective::parse("").is_none());
+    }
+
+    #[test]
+    fn grid_search_single_param_single_step() {
+        let space = SearchSpace {
+            params: vec![(
+                "fee_rate".into(),
+                ParamRange::Float {
+                    min: 0.001,
+                    max: 0.001,
+                    steps: 1,
+                },
+            )],
+        };
+        let combos = grid_search(&space);
+        assert_eq!(combos.len(), 1);
+        assert!((combos[0]["fee_rate"] - 0.001).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn grid_search_empty_space() {
+        let space = SearchSpace { params: vec![] };
+        let combos = grid_search(&space);
+        // Empty space should produce one combo (the empty combination)
+        assert_eq!(combos.len(), 1);
+        assert!(combos[0].is_empty());
+    }
+
+    #[test]
+    fn random_search_values_in_range() {
+        let space = SearchSpace {
+            params: vec![(
+                "fee_rate".into(),
+                ParamRange::Float {
+                    min: 0.0,
+                    max: 1.0,
+                    steps: 10,
+                },
+            )],
+        };
+        let results = random_search(&space, 100, 42);
+        assert_eq!(results.len(), 100);
+        for r in &results {
+            let val = r["fee_rate"];
+            assert!(val >= 0.0 && val <= 1.0, "value {val} out of range [0, 1]");
+        }
+    }
+
+    #[test]
+    fn apply_params_unknown_param_ignored() {
+        let base = RlConfig::default();
+        let mut params = HashMap::new();
+        params.insert("nonexistent_param".into(), 999.0);
+        let modified = apply_params(&base, &params);
+        // Should not change any defaults
+        assert!((modified.env.fee_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn objective_profit_factor_infinite() {
+        let metrics = EpisodeMetrics {
+            initial_balance: 10_000.0,
+            final_balance: 11_000.0,
+            equity_curve: vec![],
+            total_return_pct: 10.0,
+            buy_and_hold_return_pct: 5.0,
+            alpha: 5.0,
+            max_drawdown_pct: 0.0,
+            sharpe_ratio: 0.0,
+            sortino_ratio: 0.0,
+            total_trades: 1,
+            winning_trades: 1,
+            losing_trades: 0,
+            win_rate: 1.0,
+            profit_factor: f64::INFINITY,
+            avg_win: 1000.0,
+            avg_loss: 0.0,
+            largest_win: 1000.0,
+            largest_loss: 0.0,
+            avg_hold_duration: 5.0,
+            total_fees_paid: 0.0,
+        };
+        // Infinite profit factor should be converted to f64::MAX
+        let val = Objective::ProfitFactor.extract(&metrics);
+        assert_eq!(val, f64::MAX);
+    }
 }

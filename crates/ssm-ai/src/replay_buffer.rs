@@ -242,4 +242,114 @@ mod tests {
         buf.update_priority(0, 999.0);
         assert!((buf.buffer[0].priority - 999.0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn circular_overwrites_oldest() {
+        let mut buf = ReplayBuffer::new(3);
+        buf.push(make_transition(1.0));
+        buf.push(make_transition(2.0));
+        buf.push(make_transition(3.0));
+        // Now push a 4th -- should overwrite the first (reward=1.0)
+        buf.push(make_transition(4.0));
+        assert_eq!(buf.len(), 3);
+        // The oldest (reward=1.0) should be replaced by reward=4.0
+        assert!((buf.buffer[0].reward - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sample_larger_than_buffer() {
+        let mut buf = ReplayBuffer::new(100);
+        for i in 0..5 {
+            buf.push(make_transition(i as f64));
+        }
+        // Requesting more samples than in buffer should clamp
+        let batch = buf.sample(50, 42);
+        assert_eq!(batch.len(), 5);
+    }
+
+    #[test]
+    fn sample_zero_batch_size() {
+        let mut buf = ReplayBuffer::new(100);
+        buf.push(make_transition(1.0));
+        let batch = buf.sample(0, 42);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn update_priority_out_of_bounds() {
+        let mut buf = ReplayBuffer::new(10);
+        buf.push(make_transition(1.0));
+        // Should be a no-op, not panic
+        buf.update_priority(99, 999.0);
+        assert!((buf.buffer[0].priority - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prioritized_sampling_deterministic() {
+        let mut buf = ReplayBuffer::new(100);
+        for i in 0..20 {
+            buf.push(make_transition(i as f64));
+        }
+        let a = buf.sample_prioritized(10, 42, 1.0);
+        let b = buf.sample_prioritized(10, 42, 1.0);
+        assert_eq!(a.len(), b.len());
+        for ((ia, ta), (ib, tb)) in a.iter().zip(b.iter()) {
+            assert_eq!(ia, ib);
+            assert!((ta.reward - tb.reward).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn capacity_one_buffer() {
+        let mut buf = ReplayBuffer::new(1);
+        buf.push(make_transition(1.0));
+        assert_eq!(buf.len(), 1);
+        buf.push(make_transition(2.0));
+        assert_eq!(buf.len(), 1);
+        // Should hold the latest value
+        assert!((buf.buffer[0].reward - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn transition_done_flag_preserved() {
+        let mut buf = ReplayBuffer::new(10);
+        let t = Transition {
+            state: vec![1.0],
+            action: vec![0.0],
+            reward: 0.5,
+            next_state: vec![2.0],
+            done: true,
+            priority: 1.0,
+        };
+        buf.push(t);
+        assert!(buf.buffer[0].done);
+    }
+
+    #[test]
+    fn different_seeds_produce_different_samples() {
+        let mut buf = ReplayBuffer::new(100);
+        for i in 0..100 {
+            buf.push(make_transition(i as f64));
+        }
+        let a = buf.sample(10, 1);
+        let b = buf.sample(10, 9999);
+        // With 100 items and different seeds, at least one sample should differ
+        let any_different = a
+            .iter()
+            .zip(b.iter())
+            .any(|(x, y)| (x.reward - y.reward).abs() > f64::EPSILON);
+        assert!(any_different, "different seeds should produce different samples");
+    }
+
+    #[test]
+    fn prioritized_sample_empty_and_zero_batch() {
+        let buf = ReplayBuffer::new(10);
+        let result = buf.sample_prioritized(5, 42, 1.0);
+        assert!(result.is_empty());
+
+        let mut buf2 = ReplayBuffer::new(10);
+        buf2.push(make_transition(1.0));
+        let result2 = buf2.sample_prioritized(0, 42, 1.0);
+        assert!(result2.is_empty());
+    }
 }

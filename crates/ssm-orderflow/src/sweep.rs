@@ -166,4 +166,100 @@ mod tests {
         let events = detect_sweeps(&candles, &config);
         assert!(events.is_empty());
     }
+
+    #[test]
+    fn empty_candles_no_sweeps() {
+        let events = detect_sweeps(&[], &SweepConfig::default());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn default_config_values() {
+        let config = SweepConfig::default();
+        assert_eq!(config.min_wick_ratio, Decimal::from(2));
+        assert_eq!(config.min_wick_pct, Decimal::new(1, 3));
+    }
+
+    #[test]
+    fn doji_candle_with_large_wicks_detects_both_sweeps() {
+        // Doji: open == close, but large wicks both directions
+        // open=close=100, high=120, low=80 => body=0, upper_wick=20, lower_wick=20
+        let candles = vec![candle_ohlc("100", "120", "80", "100")];
+        let config = SweepConfig {
+            min_wick_ratio: Decimal::from(2),
+            min_wick_pct: Decimal::new(1, 3),
+        };
+        let events = detect_sweeps(&candles, &config);
+        // Both bearish and bullish sweeps should be detected
+        let bearish = events.iter().filter(|e| e.sweep_type == SweepType::BearishSweep).count();
+        let bullish = events.iter().filter(|e| e.sweep_type == SweepType::BullishSweep).count();
+        assert_eq!(bearish, 1);
+        assert_eq!(bullish, 1);
+    }
+
+    #[test]
+    fn wick_below_min_pct_threshold_not_detected() {
+        // Tiny wick relative to price — below min_wick_pct
+        // price ~1000, wick = 0.1 => wick_pct = 0.0001 < 0.001
+        let candles = vec![candle_ohlc("1000", "1000.1", "999.95", "1000.05")];
+        let config = SweepConfig {
+            min_wick_ratio: Decimal::from(1),
+            min_wick_pct: Decimal::new(1, 3), // 0.1%
+        };
+        let events = detect_sweeps(&candles, &config);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn single_candle_only_upper_sweep() {
+        // Large upper wick, no lower wick
+        // open=100, high=120, low=100, close=101 => upper_wick=19, lower_wick=0, body=1
+        let candles = vec![candle_ohlc("100", "120", "100", "101")];
+        let config = SweepConfig {
+            min_wick_ratio: Decimal::from(2),
+            min_wick_pct: Decimal::new(1, 3),
+        };
+        let events = detect_sweeps(&candles, &config);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sweep_type, SweepType::BearishSweep);
+    }
+
+    #[test]
+    fn high_wick_ratio_threshold_filters_moderate_wicks() {
+        // Moderate wick that passes low ratio but fails high ratio
+        // open=100, high=108, low=95, close=103 => body=3, upper=5, lower=5
+        let candles = vec![candle_ohlc("100", "108", "95", "103")];
+        let lenient = SweepConfig {
+            min_wick_ratio: Decimal::from(1),
+            min_wick_pct: Decimal::new(1, 3),
+        };
+        let strict = SweepConfig {
+            min_wick_ratio: Decimal::from(5),
+            min_wick_pct: Decimal::new(1, 3),
+        };
+        let events_lenient = detect_sweeps(&candles, &lenient);
+        let events_strict = detect_sweeps(&candles, &strict);
+        assert!(events_lenient.len() > events_strict.len(),
+            "strict config should detect fewer sweeps");
+    }
+
+    #[test]
+    fn multiple_candles_independent_detection() {
+        // Two candles, each with different sweep types
+        let candles = vec![
+            candle_ohlc("100", "120", "99", "101"), // bearish sweep (upper wick=19, body=1)
+            candle_ohlc("100", "101", "80", "99"),  // bullish sweep (lower wick=19, body=1)
+        ];
+        let config = SweepConfig {
+            min_wick_ratio: Decimal::from(2),
+            min_wick_pct: Decimal::new(1, 3),
+        };
+        let events = detect_sweeps(&candles, &config);
+        let bearish: Vec<_> = events.iter().filter(|e| e.sweep_type == SweepType::BearishSweep).collect();
+        let bullish: Vec<_> = events.iter().filter(|e| e.sweep_type == SweepType::BullishSweep).collect();
+        assert!(!bearish.is_empty(), "should detect bearish sweep on first candle");
+        assert!(!bullish.is_empty(), "should detect bullish sweep on second candle");
+        assert_eq!(bearish[0].index, 0);
+        assert_eq!(bullish[0].index, 1);
+    }
 }

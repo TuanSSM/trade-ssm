@@ -171,4 +171,34 @@ mod tests {
             assert_eq!(signal.action, AIAction::EnterLong);
         }
     }
+
+    #[test]
+    fn test_strategy_name() {
+        let strategy = OrderFlowStrategy::new(10);
+        assert_eq!(strategy.name(), "orderflow");
+    }
+
+    #[test]
+    fn test_bearish_imbalance_produces_short() {
+        let mut candles: Vec<_> = (0..20).map(|_| candle_cv("100", "50", "50")).collect();
+        // Add strong sell imbalance at end
+        candles.push(candle_cv("99", "10", "90"));
+        candles.push(candle_cv("98", "5", "95"));
+        candles.push(candle_cv("97", "8", "92"));
+
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        if let Some(signal) = result {
+            assert_eq!(signal.action, AIAction::EnterShort);
+        }
+    }
+
+    #[test]
+    fn test_balanced_returns_none() {
+        let candles: Vec<_> = (0..25).map(|_| candle_cv("100", "50", "50")).collect();
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        // Equal buy/sell throughout — score near 0, should return None
+        assert!(result.is_none());
+    }
 }

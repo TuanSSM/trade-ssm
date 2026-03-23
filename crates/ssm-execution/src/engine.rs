@@ -158,4 +158,88 @@ mod tests {
         assert!(pos.is_some());
         assert_eq!(pos.unwrap().side, Side::Buy);
     }
+
+    #[test]
+    fn test_enter_short_signal() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let signal = test_signal(ssm_core::AIAction::EnterShort);
+        let order = engine
+            .submit_signal(&signal, Decimal::from(1), Decimal::from(50000))
+            .unwrap();
+        assert_eq!(order.side, Side::Sell);
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_exit_long_signal() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let signal = test_signal(ssm_core::AIAction::ExitLong);
+        let order = engine
+            .submit_signal(&signal, Decimal::from(1), Decimal::from(50000))
+            .unwrap();
+        assert_eq!(order.side, Side::Sell);
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_exit_short_signal() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let signal = test_signal(ssm_core::AIAction::ExitShort);
+        let order = engine
+            .submit_signal(&signal, Decimal::from(1), Decimal::from(50000))
+            .unwrap();
+        assert_eq!(order.side, Side::Buy);
+        assert_eq!(order.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_engine_mode() {
+        let engine = ExecutionEngine::new(ExecutionMode::Paper);
+        assert_eq!(engine.mode(), ExecutionMode::Paper);
+    }
+
+    #[test]
+    fn test_live_mode_stays_pending() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Live);
+        let order = Order {
+            id: "test-live".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::from(1),
+            price: None,
+            stop_price: None,
+            trailing_delta: None,
+            time_in_force: None,
+            reduce_only: false,
+            status: OrderStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = engine.submit_order(order, Decimal::from(50000)).unwrap();
+        assert_eq!(result.status, OrderStatus::Pending);
+    }
+
+    #[test]
+    fn test_submit_raw_order() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let order = Order {
+            id: "raw-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::from(2),
+            price: None,
+            stop_price: None,
+            trailing_delta: None,
+            time_in_force: None,
+            reduce_only: false,
+            status: OrderStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = engine.submit_order(order, Decimal::from(45000)).unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert!(engine.positions().has_position("BTCUSDT"));
+    }
 }
