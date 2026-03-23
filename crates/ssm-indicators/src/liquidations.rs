@@ -164,4 +164,156 @@ mod tests {
         assert_eq!(s.total_short_liquidations, 0);
         assert_eq!(s.bias, LiquidationBias::Balanced);
     }
+
+    #[test]
+    fn test_short_bias() {
+        let liqs = vec![
+            liq("BUY", "50000", "1.0"),  // $50k short liq
+            liq("BUY", "50000", "0.5"),  // $25k short liq
+            liq("SELL", "50000", "0.1"), // $5k long liq
+        ];
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_short_liquidations, 2);
+        assert_eq!(s.total_long_liquidations, 1);
+        assert_eq!(s.bias, LiquidationBias::ShortsLiquidated);
+    }
+
+    #[test]
+    fn test_balanced_bias() {
+        let liqs = vec![
+            liq("SELL", "50000", "1.0"), // $50k long liq
+            liq("BUY", "50000", "1.0"),  // $50k short liq
+        ];
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.bias, LiquidationBias::Balanced);
+    }
+
+    #[test]
+    fn test_liquidation_bias_display() {
+        assert_eq!(
+            LiquidationBias::LongsLiquidated.to_string(),
+            "LONGS REKT (bearish)"
+        );
+        assert_eq!(
+            LiquidationBias::ShortsLiquidated.to_string(),
+            "SHORTS REKT (bullish)"
+        );
+        assert_eq!(LiquidationBias::Balanced.to_string(), "BALANCED");
+    }
+
+    #[test]
+    fn test_sub_threshold_liquidations() {
+        // All below $1K → no tier counts (classify returns None)
+        let liqs = vec![
+            liq("SELL", "100", "0.5"),  // $50
+            liq("BUY", "200", "1.0"),   // $200
+        ];
+        let s = analyze_liquidations(&liqs);
+        for tier in &s.by_tier {
+            assert_eq!(tier.long_count, 0, "No long tier counts for sub-threshold");
+            assert_eq!(tier.short_count, 0, "No short tier counts for sub-threshold");
+        }
+    }
+
+    #[test]
+    fn test_all_tiers_populated() {
+        // by_tier should always have 4 entries regardless of data
+        let s = analyze_liquidations(&[]);
+        assert_eq!(s.by_tier.len(), 4);
+        assert_eq!(s.by_tier[0].tier, LiquidationTier::Small);
+        assert_eq!(s.by_tier[1].tier, LiquidationTier::Medium);
+        assert_eq!(s.by_tier[2].tier, LiquidationTier::Large);
+        assert_eq!(s.by_tier[3].tier, LiquidationTier::Massive);
+    }
+
+    #[test]
+    fn test_single_long_liquidation() {
+        let liqs = vec![liq("SELL", "50000", "1.0")]; // $50k long liq
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_long_liquidations, 1);
+        assert_eq!(s.total_short_liquidations, 0);
+        assert_eq!(
+            s.total_long_value,
+            Decimal::from_str("50000").unwrap()
+        );
+        assert_eq!(s.total_short_value, Decimal::ZERO);
+        // One long with 0 shorts => long_val > short_val * 2 => LongsLiquidated
+        assert_eq!(s.bias, LiquidationBias::LongsLiquidated);
+    }
+
+    #[test]
+    fn test_single_short_liquidation() {
+        let liqs = vec![liq("BUY", "40000", "2.0")]; // $80k short liq
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_long_liquidations, 0);
+        assert_eq!(s.total_short_liquidations, 1);
+        assert_eq!(s.total_short_value, Decimal::from_str("80000").unwrap());
+        assert_eq!(s.bias, LiquidationBias::ShortsLiquidated);
+    }
+
+    #[test]
+    fn test_extreme_leverage_large_quantity() {
+        // Very large quantity simulating high leverage liquidation
+        let liqs = vec![liq("SELL", "60000", "100.0")]; // $6M long liq
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_long_liquidations, 1);
+        let expected = Decimal::from_str("6000000").unwrap();
+        assert_eq!(s.total_long_value, expected);
+        // Should be classified as Massive tier
+        let massive = s
+            .by_tier
+            .iter()
+            .find(|t| t.tier == LiquidationTier::Massive)
+            .unwrap();
+        assert_eq!(massive.long_count, 1);
+        assert_eq!(massive.long_value, expected);
+    }
+
+    #[test]
+    fn test_extreme_leverage_tiny_quantity() {
+        // Very small quantity (e.g., someone liquidated with tiny position)
+        let liqs = vec![liq("SELL", "50000", "0.001")]; // $50 long liq
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_long_liquidations, 1);
+        assert_eq!(s.total_long_value, Decimal::from_str("50").unwrap());
+        // Below $1K, should not appear in any tier
+        for tier in &s.by_tier {
+            assert_eq!(tier.long_count, 0);
+        }
+    }
+
+    #[test]
+    fn test_empty_liquidations_totals_zero() {
+        let s = analyze_liquidations(&[]);
+        assert_eq!(s.total_long_liquidations, 0);
+        assert_eq!(s.total_short_liquidations, 0);
+        assert_eq!(s.total_long_value, Decimal::ZERO);
+        assert_eq!(s.total_short_value, Decimal::ZERO);
+        assert_eq!(s.bias, LiquidationBias::Balanced);
+        assert_eq!(s.by_tier.len(), 4);
+        for tier in &s.by_tier {
+            assert_eq!(tier.long_count, 0);
+            assert_eq!(tier.short_count, 0);
+            assert_eq!(tier.long_value, Decimal::ZERO);
+            assert_eq!(tier.short_value, Decimal::ZERO);
+        }
+    }
+
+    #[test]
+    fn test_many_small_liquidations_add_up() {
+        // Many small liquidations that individually are sub-threshold
+        let liqs: Vec<_> = (0..100)
+            .map(|_| liq("SELL", "100", "0.5")) // $50 each
+            .collect();
+        let s = analyze_liquidations(&liqs);
+        assert_eq!(s.total_long_liquidations, 100);
+        assert_eq!(
+            s.total_long_value,
+            Decimal::from_str("5000").unwrap()
+        );
+        // Each is $50, below Small tier threshold
+        for tier in &s.by_tier {
+            assert_eq!(tier.long_count, 0);
+        }
+    }
 }

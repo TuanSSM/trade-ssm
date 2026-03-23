@@ -275,15 +275,16 @@ mod tests {
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
-    fn candle_at(close: &str, buy: &str, sell: &str) -> Candle {
-        let bv = Decimal::from_str(buy).unwrap();
-        let sv = Decimal::from_str(sell).unwrap();
+    fn candle_at(close: &str, buy_vol: &str, sell_vol: &str) -> Candle {
+        let c = Decimal::from_str(close).unwrap();
+        let bv = Decimal::from_str(buy_vol).unwrap();
+        let sv = Decimal::from_str(sell_vol).unwrap();
         Candle {
             open_time: 0,
-            open: Decimal::from_str(close).unwrap(),
-            high: Decimal::from_str(close).unwrap() + Decimal::from(5),
-            low: Decimal::from_str(close).unwrap() - Decimal::from(5),
-            close: Decimal::from_str(close).unwrap(),
+            open: c,
+            high: c + Decimal::from(5),
+            low: c - Decimal::from(5),
+            close: c,
             volume: bv + sv,
             close_time: 1000,
             quote_volume: Decimal::ZERO,
@@ -315,16 +316,13 @@ mod tests {
         let candles = vec![
             candle_at("100", "50", "50"),
             candle_at("100", "50", "50"),
-            candle_at("110", "50", "50"), // price went up
+            candle_at("110", "50", "50"),
         ];
         let mut features = extract_features(&candles, 3);
         label_features(&mut features, &candles, 1);
 
-        // First feature should see price go flat (100 → 100)
         assert_eq!(features[0].label, Some(0.0));
-        // Second should see price go up (100 → 110)
         assert_eq!(features[1].label, Some(1.0));
-        // Third has no future
         assert_eq!(features[2].label, None);
     }
 
@@ -334,10 +332,112 @@ mod tests {
         assert!(features.is_empty());
     }
 
+    // --- Tests from branch (ours) ---
+
+    #[test]
+    fn single_candle_features() {
+        let candles = vec![candle_at("100", "60", "40")];
+        let features = extract_features(&candles, 5);
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].features.len(), FEATURE_COUNT);
+        // open/base_price = 100/100 = 1.0
+        assert!((features[0].features[0] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn extract_features_deterministic() {
+        let candles: Vec<_> = (0..20).map(|_| candle_at("50000", "60", "40")).collect();
+        let a = extract_features(&candles, 15);
+        let b = extract_features(&candles, 15);
+        assert_eq!(a.len(), b.len());
+        for (fa, fb) in a.iter().zip(b.iter()) {
+            for (va, vb) in fa.features.iter().zip(fb.features.iter()) {
+                assert!((va - vb).abs() < f64::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn label_features_with_horizon_beyond_data() {
+        let candles = vec![
+            candle_at("100", "50", "50"),
+            candle_at("110", "50", "50"),
+        ];
+        let mut features = extract_features(&candles, 2);
+        label_features(&mut features, &candles, 10);
+        for f in &features {
+            assert_eq!(f.label, None);
+        }
+    }
+
+    #[test]
+    fn label_features_price_decrease() {
+        let candles = vec![
+            candle_at("110", "50", "50"),
+            candle_at("100", "50", "50"),
+            candle_at("90", "50", "50"),
+        ];
+        let mut features = extract_features(&candles, 3);
+        label_features(&mut features, &candles, 1);
+        assert_eq!(features[0].label, Some(-1.0));
+    }
+
+    #[test]
+    fn zero_volume_buy_sell_ratio() {
+        let c = Candle {
+            open_time: 0,
+            open: Decimal::from(100),
+            high: Decimal::from(105),
+            low: Decimal::from(95),
+            close: Decimal::from(100),
+            volume: Decimal::ZERO,
+            close_time: 1000,
+            quote_volume: Decimal::ZERO,
+            trades: 0,
+            taker_buy_volume: Decimal::ZERO,
+            taker_sell_volume: Decimal::ZERO,
+        };
+        let features = extract_features(&[c], 1);
+        assert_eq!(features.len(), 1);
+        assert!((features[0].features[5] - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn price_change_pct_computed_correctly() {
+        let candles = vec![candle_at("100", "50", "50")];
+        let features = extract_features(&candles, 1);
+        assert!((features[0].features[8] - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn range_pct_computed_correctly() {
+        let candles = vec![candle_at("100", "50", "50")];
+        let features = extract_features(&candles, 1);
+        assert!((features[0].features[9] - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn cvd_window_larger_than_candles() {
+        let candles: Vec<_> = (0..5).map(|_| candle_at("100", "60", "40")).collect();
+        let features = extract_features(&candles, 100);
+        assert_eq!(features.len(), 5);
+    }
+
+    #[test]
+    fn label_features_all_flat_prices() {
+        let candles: Vec<_> = (0..10).map(|_| candle_at("100", "50", "50")).collect();
+        let mut features = extract_features(&candles, 10);
+        label_features(&mut features, &candles, 1);
+        for f in &features[..features.len() - 1] {
+            assert_eq!(f.label, Some(0.0), "flat prices should produce label 0.0");
+        }
+        assert_eq!(features.last().unwrap().label, None);
+    }
+
+    // --- Tests from main (theirs) ---
+
     #[test]
     fn anti_repainting_indicator_features_stable() {
-        // Compute features on N candles, then on N+1 candles.
-        // Indicator-derived features (indices 10-21) must not change for overlapping candles.
         let candles: Vec<_> = (0..50)
             .map(|i| {
                 let p = Decimal::from_str(&format!("{}", 100 + (i % 10))).unwrap();
@@ -363,12 +463,10 @@ mod tests {
         let features_n = extract_features(&candles[..49], window);
         let features_n1 = extract_features(&candles[..50], window);
 
-        // Find the matching feature row by timestamp
         let last_n = features_n.last().unwrap();
         let matching = features_n1.iter().find(|f| f.timestamp == last_n.timestamp);
         assert!(matching.is_some(), "no matching timestamp found");
         let m = matching.unwrap();
-        // Check indicator features (10-21) for anti-repainting stability
         for j in 10..FEATURE_COUNT {
             assert!(
                 (last_n.features[j] - m.features[j]).abs() < 1e-10,
@@ -381,7 +479,6 @@ mod tests {
 
     #[test]
     fn all_indicator_features_populated() {
-        // With enough candles, all features should be non-zero for varying data
         let candles: Vec<_> = (0..50)
             .map(|i| {
                 let p = format!("{}", 100 + i);
@@ -391,11 +488,8 @@ mod tests {
         let features = extract_features(&candles, 10);
         assert!(!features.is_empty());
         assert_eq!(features[0].features.len(), FEATURE_COUNT);
-        // RSI, EMA ratio, etc. should have values when enough history
         let last = features.last().unwrap();
-        // RSI should be between 0 and 1 (scaled)
         assert!(last.features[10] >= 0.0 && last.features[10] <= 1.0);
-        // EMA ratio should be positive
         assert!(last.features[11] > 0.0);
     }
 }

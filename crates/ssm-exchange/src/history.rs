@@ -126,4 +126,73 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_save_creates_directory() {
+        let dir = std::env::temp_dir().join("ssm_test_nested_dir/a/b/c");
+        let path = dir.join("candles.json");
+
+        // Ensure it doesn't exist beforehand
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("ssm_test_nested_dir"));
+
+        let candles = vec![sample_candle(1000000)];
+        save_candles(&candles, &path).unwrap();
+
+        assert!(path.exists());
+        let loaded = load_candles(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("ssm_test_nested_dir"));
+    }
+
+    #[test]
+    fn test_load_nonexistent_file_errors() {
+        let path = std::env::temp_dir().join("ssm_test_nonexistent_file_xyz.json");
+        let result = load_candles(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_empty_candles() {
+        let dir = std::env::temp_dir().join("ssm_test_empty_candles");
+        let path = dir.join("empty.json");
+
+        let candles: Vec<Candle> = vec![];
+        save_candles(&candles, &path).unwrap();
+
+        let loaded = load_candles(&path).unwrap();
+        assert!(loaded.is_empty());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_all_fields() {
+        let dir = std::env::temp_dir().join("ssm_test_all_fields");
+        let path = dir.join("all_fields.json");
+
+        let candle = sample_candle(5000000);
+        save_candles(&[candle.clone()], &path).unwrap();
+
+        let loaded = load_candles(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+
+        let c = &loaded[0];
+        assert_eq!(c.open_time, candle.open_time);
+        assert_eq!(c.open, candle.open);
+        assert_eq!(c.high, candle.high);
+        assert_eq!(c.low, candle.low);
+        assert_eq!(c.close, candle.close);
+        assert_eq!(c.volume, candle.volume);
+        assert_eq!(c.close_time, candle.close_time);
+        assert_eq!(c.quote_volume, candle.quote_volume);
+        assert_eq!(c.trades, candle.trades);
+        assert_eq!(c.taker_buy_volume, candle.taker_buy_volume);
+        assert_eq!(c.taker_sell_volume, candle.taker_sell_volume);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

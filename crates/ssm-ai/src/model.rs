@@ -319,6 +319,120 @@ mod tests {
         let _m: Box<dyn AIModel> = Box::new(StubModel);
     }
 
+    // --- Tests from branch (ours) ---
+
+    #[test]
+    fn stub_model_predict_batch() {
+        let model = StubModel;
+        let rows: Vec<FeatureRow> = (0..5)
+            .map(|i| FeatureRow {
+                timestamp: i,
+                features: vec![i as f64],
+                label: None,
+            })
+            .collect();
+        let predictions = model.predict_batch(&rows).unwrap();
+        assert_eq!(predictions.len(), 5);
+        for p in &predictions {
+            assert_eq!(*p, AIAction::Neutral);
+        }
+    }
+
+    #[test]
+    fn stub_model_predict_batch_empty() {
+        let model = StubModel;
+        let predictions = model.predict_batch(&[]).unwrap();
+        assert!(predictions.is_empty());
+    }
+
+    #[test]
+    fn stub_model_train_empty_data() {
+        let mut model = StubModel;
+        let m = model.train(&[]).unwrap();
+        assert_eq!(m.samples, 0);
+        assert_eq!(m.model_name, "stub");
+        assert!((m.accuracy - 0.0).abs() < f64::EPSILON);
+        assert!((m.loss - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn stub_model_save_load_roundtrip() {
+        let mut model = StubModel;
+        let path = std::path::Path::new("/tmp/stub_model_test");
+        assert!(model.save(path).is_ok());
+        assert!(model.load(path).is_ok());
+        let row = FeatureRow {
+            timestamp: 0,
+            features: vec![],
+            label: None,
+        };
+        assert_eq!(model.predict(&row).unwrap(), AIAction::Neutral);
+    }
+
+    #[test]
+    fn train_metrics_serialize() {
+        let m = TrainMetrics {
+            model_name: "test".into(),
+            samples: 42,
+            accuracy: 0.95,
+            loss: 0.05,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"model_name\":\"test\""));
+        assert!(json.contains("\"samples\":42"));
+    }
+
+    #[test]
+    fn stub_model_name() {
+        let model = StubModel;
+        assert_eq!(model.name(), "stub");
+    }
+
+    #[test]
+    fn stub_model_predict_with_large_feature_vector() {
+        let model = StubModel;
+        let row = FeatureRow {
+            timestamp: 999999,
+            features: vec![0.0; 1000],
+            label: Some(42.0),
+        };
+        assert_eq!(model.predict(&row).unwrap(), AIAction::Neutral);
+    }
+
+    #[test]
+    fn stub_model_train_large_dataset() {
+        let mut model = StubModel;
+        let data: Vec<FeatureRow> = (0..1000)
+            .map(|i| FeatureRow {
+                timestamp: i,
+                features: vec![i as f64; 10],
+                label: Some(if i % 2 == 0 { 1.0 } else { -1.0 }),
+            })
+            .collect();
+        let m = model.train(&data).unwrap();
+        assert_eq!(m.samples, 1000);
+        assert_eq!(m.model_name, "stub");
+        assert!((m.accuracy - 0.0).abs() < f64::EPSILON);
+        assert!((m.loss - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn train_metrics_clone() {
+        let m = TrainMetrics {
+            model_name: "clone_test".into(),
+            samples: 7,
+            accuracy: 0.85,
+            loss: 0.15,
+        };
+        let cloned = m.clone();
+        assert_eq!(cloned.model_name, "clone_test");
+        assert_eq!(cloned.samples, 7);
+        assert!((cloned.accuracy - 0.85).abs() < f64::EPSILON);
+        assert!((cloned.loss - 0.15).abs() < f64::EPSILON);
+    }
+
+    // --- Tests from main (theirs) ---
+
     #[test]
     fn table_model_predicts_neutral_with_zero_weights() {
         let model = TableModel::new(10, 0.01);
@@ -327,7 +441,6 @@ mod tests {
             features: vec![1.0; 10],
             label: None,
         };
-        // All weights zero → all scores equal → picks first (Neutral)
         let action = model.predict(&row).unwrap();
         assert_eq!(action, AIAction::Neutral);
     }
@@ -336,12 +449,11 @@ mod tests {
     fn table_model_trains_and_predicts() {
         let mut model = TableModel::new(3, 0.1);
 
-        // Train on bullish samples
         let data: Vec<FeatureRow> = (0..50)
             .map(|i| FeatureRow {
                 timestamp: i,
                 features: vec![1.0, 0.5, 0.8],
-                label: Some(1.0), // bullish
+                label: Some(1.0),
             })
             .collect();
 
@@ -349,7 +461,6 @@ mod tests {
         assert_eq!(metrics.samples, 50);
         assert!(metrics.loss >= 0.0);
 
-        // After training on bullish data, model should predict EnterLong
         let row = FeatureRow {
             timestamp: 0,
             features: vec![1.0, 0.5, 0.8],
@@ -363,7 +474,6 @@ mod tests {
     fn table_model_save_load_roundtrip() {
         let mut model = TableModel::new(5, 0.01);
 
-        // Train to get non-zero weights
         let data: Vec<FeatureRow> = (0..20)
             .map(|i| FeatureRow {
                 timestamp: i,
@@ -373,14 +483,11 @@ mod tests {
             .collect();
         model.train(&data).unwrap();
 
-        // Save
         let tmp = std::env::temp_dir().join("test_table_model.json");
         model.save(&tmp).unwrap();
 
-        // Load into new model
         let loaded = TableModel::from_checkpoint(&tmp).unwrap();
 
-        // Verify weights match
         for (a, (w_orig, w_loaded)) in model.weights.iter().zip(loaded.weights.iter()).enumerate() {
             for (j, (o, l)) in w_orig.iter().zip(w_loaded.iter()).enumerate() {
                 assert!(
@@ -390,7 +497,6 @@ mod tests {
             }
         }
 
-        // Verify predictions match
         let test_row = FeatureRow {
             timestamp: 0,
             features: vec![1.0, 2.0, 3.0, 4.0, 5.0],
@@ -401,7 +507,6 @@ mod tests {
             loaded.predict(&test_row).unwrap()
         );
 
-        // Cleanup
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -413,13 +518,12 @@ mod tests {
     #[test]
     fn table_model_handles_mismatched_feature_lengths() {
         let model = TableModel::new(5, 0.01);
-        // Fewer features than expected — should not panic
         let row = FeatureRow {
             timestamp: 0,
             features: vec![1.0, 2.0],
             label: None,
         };
         let action = model.predict(&row).unwrap();
-        assert_eq!(action, AIAction::Neutral); // zero weights → Neutral
+        assert_eq!(action, AIAction::Neutral);
     }
 }

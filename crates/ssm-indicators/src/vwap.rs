@@ -108,4 +108,94 @@ mod tests {
         let result = vwap(&[]);
         assert!(result.vwap.is_empty());
     }
+
+    #[test]
+    fn test_vwap_output_length() {
+        let candles = vec![
+            candle_hlcv("110", "90", "100", "1000"),
+            candle_hlcv("115", "95", "105", "500"),
+            candle_hlcv("120", "100", "110", "800"),
+        ];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), candles.len());
+    }
+
+    #[test]
+    fn test_vwap_constant_price() {
+        let candles: Vec<_> = (0..10)
+            .map(|_| candle_hlcv("100", "100", "100", "500"))
+            .collect();
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), 10);
+        for val in &result.vwap {
+            assert_eq!(*val, Decimal::from(100), "VWAP should equal constant price");
+        }
+    }
+
+    #[test]
+    fn test_vwap_zero_volume_candles() {
+        // When volume is zero, VWAP should fall back to typical price
+        let candles = vec![candle_hlcv("110", "90", "100", "0")];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), 1);
+        // TP = (110+90+100)/3 = 100
+        assert_eq!(result.vwap[0], Decimal::from(100));
+    }
+
+    #[test]
+    fn test_vwap_zero_volume_after_nonzero() {
+        // First candle has volume, second has zero volume
+        let candles = vec![
+            candle_hlcv("110", "90", "100", "1000"), // TP=100, vol=1000
+            candle_hlcv("120", "100", "110", "0"),    // TP=110, vol=0
+        ];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), 2);
+        // First VWAP = 100
+        assert_eq!(result.vwap[0], Decimal::from(100));
+        // Second VWAP: cum_tp_vol = 100*1000 + 110*0 = 100000, cum_vol = 1000
+        // VWAP = 100000/1000 = 100 (zero volume doesn't change cumulative)
+        assert_eq!(result.vwap[1], Decimal::from(100));
+    }
+
+    #[test]
+    fn test_vwap_single_candle_asymmetric() {
+        // High != Low != Close
+        let candles = vec![candle_hlcv("150", "90", "120", "500")];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), 1);
+        // TP = (150+90+120)/3 = 360/3 = 120
+        assert_eq!(result.vwap[0], Decimal::from(120));
+    }
+
+    #[test]
+    fn test_vwap_identical_prices_different_volumes() {
+        // All prices identical but volumes differ => VWAP stays constant
+        let candles = vec![
+            candle_hlcv("100", "100", "100", "1000"),
+            candle_hlcv("100", "100", "100", "5000"),
+            candle_hlcv("100", "100", "100", "100"),
+        ];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap.len(), 3);
+        for val in &result.vwap {
+            assert_eq!(*val, Decimal::from(100));
+        }
+    }
+
+    #[test]
+    fn test_vwap_monotonically_within_range() {
+        // VWAP should always be between the min and max typical prices seen so far
+        let candles = vec![
+            candle_hlcv("100", "100", "100", "500"), // TP = 100
+            candle_hlcv("200", "200", "200", "500"), // TP = 200
+            candle_hlcv("150", "150", "150", "500"), // TP = 150
+        ];
+        let result = vwap(&candles);
+        assert_eq!(result.vwap[0], Decimal::from(100));
+        // After adding 200, VWAP should be between 100 and 200
+        assert!(result.vwap[1] >= Decimal::from(100) && result.vwap[1] <= Decimal::from(200));
+        // After adding 150, VWAP should still be between 100 and 200
+        assert!(result.vwap[2] >= Decimal::from(100) && result.vwap[2] <= Decimal::from(200));
+    }
 }

@@ -306,4 +306,62 @@ mod tests {
         assert_eq!(Timeframe::H1.duration_ms(), 3_600_000);
         assert_eq!(Timeframe::H4.duration_ms(), 14_400_000);
     }
+
+    #[test]
+    fn timeframe_display() {
+        assert_eq!(format!("{}", Timeframe::M3), "3m");
+        assert_eq!(format!("{}", Timeframe::M15), "15m");
+        assert_eq!(format!("{}", Timeframe::H1), "1h");
+        assert_eq!(format!("{}", Timeframe::H4), "4h");
+    }
+
+    #[test]
+    fn resample_single_candle() {
+        let c = make_candle(0, 179_999, "100", "50");
+        let resampled = resample_candles(&[c.clone()], Timeframe::H1);
+        assert_eq!(resampled.len(), 1);
+        assert_eq!(resampled[0].open, c.open);
+        assert_eq!(resampled[0].close, c.close);
+    }
+
+    #[test]
+    fn extract_multi_tf_features_returns_all_timeframes() {
+        let interval_3m = 3 * 60 * 1000;
+        let candles: Vec<Candle> = (0..100)
+            .map(|i| {
+                let open = i * interval_3m;
+                let close = open + interval_3m - 1;
+                make_candle(open, close, "100", "100")
+            })
+            .collect();
+        let tfs = vec![Timeframe::M15, Timeframe::H1];
+        let result = extract_multi_tf_features(&candles, &tfs, 15);
+        assert!(result.contains_key(&Timeframe::M15));
+        assert!(result.contains_key(&Timeframe::H1));
+        // Higher timeframes should produce fewer feature rows
+        assert!(result[&Timeframe::H1].len() <= result[&Timeframe::M15].len());
+    }
+
+    #[test]
+    fn align_empty_higher_candles() {
+        let interval_3m = 3 * 60 * 1000;
+        let base: Vec<Candle> = (0..5)
+            .map(|i| {
+                let open = i * interval_3m;
+                let close = open + interval_3m - 1;
+                make_candle(open, close, "100", "100")
+            })
+            .collect();
+        let aligned = align_higher_tf_features(&base, &[], &[]);
+        assert_eq!(aligned.len(), 5);
+        assert!(aligned.iter().all(|a| a.is_none()));
+    }
+
+    #[test]
+    fn timeframe_serde_roundtrip() {
+        let tf = Timeframe::H4;
+        let json = serde_json::to_string(&tf).unwrap();
+        let parsed: Timeframe = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tf);
+    }
 }

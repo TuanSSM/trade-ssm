@@ -338,4 +338,112 @@ mod tests {
         assert!((m.profit_factor - 1.25).abs() < 0.01);
         assert!((m.win_rate - 0.5).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn all_losing_trades() {
+        let mut acc = MetricsAccumulator::new(10_000.0, 100.0);
+        acc.set_balance(9_000.0);
+        acc.record_trade(CompletedTrade {
+            side: Side::Buy,
+            entry_price: 100.0,
+            exit_price: 95.0,
+            duration: 2,
+            pnl: -500.0,
+            fees: 1.0,
+        });
+        acc.record_trade(CompletedTrade {
+            side: Side::Sell,
+            entry_price: 95.0,
+            exit_price: 100.0,
+            duration: 3,
+            pnl: -500.0,
+            fees: 1.0,
+        });
+        let m = acc.finalize(35040.0);
+        assert_eq!(m.winning_trades, 0);
+        assert_eq!(m.losing_trades, 2);
+        assert!((m.win_rate - 0.0).abs() < f64::EPSILON);
+        assert!((m.profit_factor - 0.0).abs() < f64::EPSILON);
+        assert!((m.total_fees_paid - 2.0).abs() < f64::EPSILON);
+        assert!((m.largest_loss - 500.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sortino_with_negative_returns() {
+        // All negative returns: sortino should be negative
+        let returns = vec![-0.01, -0.02, -0.005, -0.015];
+        let sortino = compute_sortino(&returns, 35040.0);
+        assert!(sortino < 0.0, "sortino should be negative for all-loss returns");
+    }
+
+    #[test]
+    fn sharpe_with_positive_returns() {
+        let returns = vec![0.01, 0.02, 0.015, 0.012];
+        let sharpe = compute_sharpe(&returns, 35040.0);
+        assert!(sharpe > 0.0, "sharpe should be positive for all-gain returns");
+    }
+
+    #[test]
+    fn sharpe_empty_returns() {
+        assert!((compute_sharpe(&[], 35040.0) - 0.0).abs() < f64::EPSILON);
+        assert!((compute_sortino(&[], 35040.0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zero_initial_balance_metrics() {
+        let acc = MetricsAccumulator::new(0.0, 100.0);
+        let m = acc.finalize(35040.0);
+        assert!((m.total_return_pct - 0.0).abs() < f64::EPSILON);
+        assert!((m.initial_balance - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn equity_curve_starts_with_initial_balance() {
+        let acc = MetricsAccumulator::new(10_000.0, 100.0);
+        let m = acc.finalize(35040.0);
+        assert_eq!(m.equity_curve.len(), 1);
+        assert!((m.equity_curve[0] - 10_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn multiple_step_equity_curve_length() {
+        let mut acc = MetricsAccumulator::new(10_000.0, 100.0);
+        for i in 0..10 {
+            acc.record_step(10_000.0 + i as f64 * 100.0, 100.0 + i as f64);
+        }
+        let m = acc.finalize(35040.0);
+        // Initial + 10 steps = 11
+        assert_eq!(m.equity_curve.len(), 11);
+    }
+
+    #[test]
+    fn no_drawdown_when_equity_only_rises() {
+        let mut acc = MetricsAccumulator::new(10_000.0, 100.0);
+        acc.record_step(11_000.0, 110.0);
+        acc.record_step(12_000.0, 120.0);
+        acc.record_step(13_000.0, 130.0);
+        acc.set_balance(13_000.0);
+        let m = acc.finalize(35040.0);
+        assert!((m.max_drawdown_pct - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn alpha_calculation() {
+        let mut acc = MetricsAccumulator::new(10_000.0, 100.0);
+        // Final price = 120 (B&H = 20%), but we only made 10% return
+        acc.record_step(11_000.0, 120.0);
+        acc.set_balance(11_000.0);
+        let m = acc.finalize(35040.0);
+        // alpha = total_return - buy_and_hold = 10% - 20% = -10%
+        assert!((m.alpha - (-10.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sortino_all_positive_returns_is_zero() {
+        // When all returns are positive, downside deviation is zero, sortino should be 0
+        let returns = vec![0.01, 0.02, 0.03];
+        let sortino = compute_sortino(&returns, 35040.0);
+        // All positive means no downside, so downside_dev ~ 0 => sortino = 0
+        assert!((sortino - 0.0).abs() < f64::EPSILON);
+    }
 }

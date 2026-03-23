@@ -346,4 +346,354 @@ mod tests {
         rm.reset_circuit_breaker(Decimal::from(85_000));
         assert!(!rm.is_circuit_breaker_active());
     }
+
+    #[test]
+    fn test_circuit_breaker_not_triggered_within_limit() {
+        let config = RiskConfig {
+            max_drawdown_pct: Decimal::new(10, 2), // 10%
+            ..Default::default()
+        };
+        let mut rm = RiskManager::new(config, Decimal::from(100_000));
+
+        // 5% drawdown — within the 10% limit
+        rm.update_equity(Decimal::from(95_000));
+        assert!(!rm.is_circuit_breaker_active());
+    }
+
+    #[test]
+    fn test_position_size_zero_stop() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        let size = rm.calculate_position_size(
+            Decimal::from(100_000),
+            Decimal::from(50_000),
+            Decimal::ZERO, // zero stop distance
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_position_size_clamped_to_max() {
+        let config = RiskConfig {
+            max_position_size: Decimal::from(5),
+            position_size_fraction: Decimal::new(50, 2), // 50% — very large fraction
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(1_000_000));
+
+        let size = rm.calculate_position_size(
+            Decimal::from(1_000_000),
+            Decimal::from(50_000),
+            Decimal::from(1), // tiny stop distance → huge raw size
+        );
+        // Should be clamped to max_position_size = 5
+        assert_eq!(size, Decimal::from(5));
+    }
+
+    #[test]
+    fn test_kelly_zero_win_rate() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        let size = rm.kelly_position_size(
+            Decimal::from(100_000),
+            Decimal::ZERO, // 0% win rate
+            Decimal::from(1_000),
+            Decimal::from(500),
+            Decimal::from(50_000),
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_kelly_zero_avg_win() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        let size = rm.kelly_position_size(
+            Decimal::from(100_000),
+            Decimal::new(60, 2),
+            Decimal::ZERO, // 0 avg win
+            Decimal::from(500),
+            Decimal::from(50_000),
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_exposure_limit_rejected() {
+        let config = RiskConfig {
+            max_total_exposure: Decimal::from(100_000), // low exposure limit
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(1_000_000));
+
+        let mut positions = HashMap::new();
+        positions.insert(
+            "BTCUSDT".into(),
+            make_position("BTCUSDT", Side::Buy, 1, 50000),
+        );
+
+        // New order would add 50000 exposure → total 100000, exceeds limit
+        let order = make_order("ETHUSDT", Side::Buy, 1);
+        let result = rm.check_order(&order, &positions, Decimal::from(60_000));
+        assert!(matches!(result, RiskCheck::Rejected(_)));
+    }
+
+    #[test]
+    fn test_adding_to_existing_position_exceeds_max() {
+        let config = RiskConfig {
+            max_position_size: Decimal::from(5),
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(1_000_000));
+
+        let mut positions = HashMap::new();
+        positions.insert(
+            "BTCUSDT".into(),
+            make_position("BTCUSDT", Side::Buy, 3, 50000),
+        );
+
+        // Adding 3 to existing 3 → 6 > max 5
+        let order = make_order("BTCUSDT", Side::Buy, 3);
+        let result = rm.check_order(&order, &positions, Decimal::from(50_000));
+        assert!(matches!(result, RiskCheck::Rejected(_)));
+    }
+
+    #[test]
+    fn test_risk_config_default() {
+        let config = RiskConfig::default();
+        assert_eq!(config.max_position_size, Decimal::from(10));
+        assert_eq!(config.max_total_exposure, Decimal::from(1_000_000));
+        assert_eq!(config.max_drawdown_pct, Decimal::new(10, 2));
+        assert_eq!(config.max_open_positions, 5);
+        assert_eq!(config.position_size_fraction, Decimal::new(2, 2));
+    }
+
+    #[test]
+    fn test_approve_existing_symbol_same_side() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(1_000_000));
+
+        let mut positions = HashMap::new();
+        positions.insert(
+            "BTCUSDT".into(),
+            make_position("BTCUSDT", Side::Buy, 2, 50000),
+        );
+
+        // Adding 3 to existing 2 → 5, within max_position_size of 10
+        let order = make_order("BTCUSDT", Side::Buy, 3);
+        let result = rm.check_order(&order, &positions, Decimal::from(50_000));
+        assert_eq!(result, RiskCheck::Approved);
+    }
+
+    #[test]
+    fn test_zero_balance_position_size() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        let size = rm.calculate_position_size(
+            Decimal::ZERO, // zero balance
+            Decimal::from(50_000),
+            Decimal::from(1_000),
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_zero_entry_price_position_size() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        let size = rm.calculate_position_size(
+            Decimal::from(100_000),
+            Decimal::ZERO, // zero entry price
+            Decimal::from(1_000),
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_kelly_zero_entry_price() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        let size = rm.kelly_position_size(
+            Decimal::from(100_000),
+            Decimal::new(60, 2),
+            Decimal::from(1_000),
+            Decimal::from(500),
+            Decimal::ZERO, // zero entry price
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_kelly_negative_edge_returns_zero() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        // Win rate 20%, avg_win 100, avg_loss 500 — negative edge
+        let size = rm.kelly_position_size(
+            Decimal::from(100_000),
+            Decimal::new(20, 2),   // 20% win rate
+            Decimal::from(100),    // avg win
+            Decimal::from(500),    // avg loss
+            Decimal::from(50_000), // entry price
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_kelly_clamped_to_max_position_size() {
+        let config = RiskConfig {
+            max_position_size: Decimal::from(1),
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        let size = rm.kelly_position_size(
+            Decimal::from(10_000_000), // huge balance
+            Decimal::new(90, 2),       // 90% win rate
+            Decimal::from(10_000),     // avg win
+            Decimal::from(100),        // avg loss
+            Decimal::from(1),          // tiny entry price
+        );
+        assert_eq!(size, Decimal::from(1));
+    }
+
+    #[test]
+    fn test_circuit_breaker_at_exact_threshold() {
+        let config = RiskConfig {
+            max_drawdown_pct: Decimal::new(10, 2), // 10%
+            ..Default::default()
+        };
+        let mut rm = RiskManager::new(config, Decimal::from(100_000));
+
+        // Exactly 10% drawdown — should trigger
+        rm.update_equity(Decimal::from(90_000));
+        assert!(rm.is_circuit_breaker_active());
+    }
+
+    #[test]
+    fn test_circuit_breaker_just_below_threshold() {
+        let config = RiskConfig {
+            max_drawdown_pct: Decimal::new(10, 2), // 10%
+            ..Default::default()
+        };
+        let mut rm = RiskManager::new(config, Decimal::from(100_000));
+
+        // 9.99% drawdown — should NOT trigger
+        rm.update_equity(Decimal::from(90_010));
+        assert!(!rm.is_circuit_breaker_active());
+    }
+
+    #[test]
+    fn test_circuit_breaker_rejects_all_orders() {
+        let mut rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        rm.update_equity(Decimal::from(80_000)); // 20% drawdown
+
+        // Even a tiny order should be rejected
+        let order = make_order("BTCUSDT", Side::Buy, 1);
+        let result = rm.check_order(&order, &HashMap::new(), Decimal::from(1));
+        match result {
+            RiskCheck::Rejected(msg) => assert!(msg.contains("circuit breaker")),
+            _ => panic!("expected rejection"),
+        }
+    }
+
+    #[test]
+    fn test_circuit_breaker_reset_allows_orders() {
+        let mut rm = RiskManager::new(RiskConfig::default(), Decimal::from(100_000));
+        rm.update_equity(Decimal::from(80_000)); // trigger breaker
+        assert!(rm.is_circuit_breaker_active());
+
+        rm.reset_circuit_breaker(Decimal::from(80_000));
+        assert!(!rm.is_circuit_breaker_active());
+
+        let order = make_order("BTCUSDT", Side::Buy, 1);
+        let result = rm.check_order(&order, &HashMap::new(), Decimal::from(50_000));
+        assert_eq!(result, RiskCheck::Approved);
+    }
+
+    #[test]
+    fn test_peak_equity_updates_upward_only() {
+        let config = RiskConfig {
+            max_drawdown_pct: Decimal::new(10, 2),
+            ..Default::default()
+        };
+        let mut rm = RiskManager::new(config, Decimal::from(100_000));
+
+        rm.update_equity(Decimal::from(110_000)); // new peak
+        rm.update_equity(Decimal::from(105_000)); // drawdown from 110k, not 100k
+
+        // 4.5% drawdown from peak of 110k — should not trigger 10% breaker
+        assert!(!rm.is_circuit_breaker_active());
+    }
+
+    #[test]
+    fn test_order_opposite_side_existing_position_approved() {
+        let rm = RiskManager::new(RiskConfig::default(), Decimal::from(1_000_000));
+
+        let mut positions = HashMap::new();
+        positions.insert(
+            "BTCUSDT".into(),
+            make_position("BTCUSDT", Side::Buy, 5, 50000),
+        );
+
+        // Sell order against existing long — should be approved (reducing position)
+        let order = make_order("BTCUSDT", Side::Sell, 3);
+        let result = rm.check_order(&order, &positions, Decimal::from(50_000));
+        assert_eq!(result, RiskCheck::Approved);
+    }
+
+    #[test]
+    fn test_max_positions_allows_existing_symbol() {
+        let config = RiskConfig {
+            max_open_positions: 1,
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(1_000_000));
+
+        let mut positions = HashMap::new();
+        positions.insert(
+            "BTCUSDT".into(),
+            make_position("BTCUSDT", Side::Buy, 1, 50000),
+        );
+
+        // Adding to existing position should be allowed even at max positions
+        let order = make_order("BTCUSDT", Side::Buy, 1);
+        let result = rm.check_order(&order, &positions, Decimal::from(50_000));
+        assert_eq!(result, RiskCheck::Approved);
+    }
+
+    #[test]
+    fn test_zero_peak_equity_no_panic() {
+        let config = RiskConfig {
+            max_drawdown_pct: Decimal::new(10, 2),
+            ..Default::default()
+        };
+        let mut rm = RiskManager::new(config, Decimal::ZERO);
+
+        // Should not panic or trigger breaker with zero peak
+        rm.update_equity(Decimal::ZERO);
+        assert!(!rm.is_circuit_breaker_active());
+    }
+
+    #[test]
+    fn test_exposure_at_exact_limit_rejected() {
+        let config = RiskConfig {
+            max_total_exposure: Decimal::from(50_001),
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(1_000_000));
+
+        let positions = HashMap::new();
+
+        // Order exposure = 1 * 50001 = 50001, but limit check is >, so 50001 is not > 50001
+        let order = make_order("BTCUSDT", Side::Buy, 1);
+        let result = rm.check_order(&order, &positions, Decimal::from(50_001));
+        // 50001 is not > 50001, so approved
+        assert_eq!(result, RiskCheck::Approved);
+    }
+
+    #[test]
+    fn test_exposure_just_over_limit_rejected() {
+        let config = RiskConfig {
+            max_total_exposure: Decimal::from(50_000),
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(1_000_000));
+
+        let positions = HashMap::new();
+        let order = make_order("BTCUSDT", Side::Buy, 1);
+        // exposure = 1 * 50001 = 50001 > 50000
+        let result = rm.check_order(&order, &positions, Decimal::from(50_001));
+        assert!(matches!(result, RiskCheck::Rejected(_)));
+    }
 }

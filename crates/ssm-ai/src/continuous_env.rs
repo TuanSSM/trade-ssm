@@ -306,4 +306,137 @@ mod tests {
         });
         assert!(obs.done);
     }
+
+    #[test]
+    fn reset_clears_position() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("120"),
+        ];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        env.step(ContinuousAction {
+            position_target: 1.0,
+        });
+        let obs = env.reset();
+        assert!((obs.current_position - 0.0).abs() < 1e-10);
+        assert!((obs.balance - 10_000.0).abs() < f64::EPSILON);
+        assert_eq!(obs.step, 0);
+    }
+
+    #[test]
+    fn negative_clamping() {
+        let candles = vec![candle_price("100"), candle_price("100")];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: -10.0,
+        });
+        assert!((obs.current_position - (-1.0)).abs() < 1e-10); // Clamped to -1.0
+    }
+
+    #[test]
+    fn flat_position_no_unrealized_pnl() {
+        let candles = vec![candle_price("100"), candle_price("200")];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        // Stay flat
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: 0.0,
+        });
+        assert!((obs.unrealized_pnl - 0.0).abs() < 1e-10);
+        assert!((obs.equity - obs.balance).abs() < 1e-10);
+    }
+
+    #[test]
+    fn flip_long_to_short() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("100"),
+        ];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        // Go long
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: 1.0,
+        });
+        assert!((obs.current_position - 1.0).abs() < 1e-10);
+        // Flip to short
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: -1.0,
+        });
+        assert!((obs.current_position - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn episode_metrics_available() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("120"),
+        ];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        env.step(ContinuousAction {
+            position_target: 1.0,
+        });
+        env.step(ContinuousAction {
+            position_target: 0.0,
+        });
+        let metrics = env.episode_metrics(35040.0);
+        assert!((metrics.initial_balance - 10_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn gradual_position_increase() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("100"),
+        ];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        // Gradually increase position
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: 0.25,
+        });
+        assert!((obs.current_position - 0.25).abs() < 1e-10);
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: 0.5,
+        });
+        assert!((obs.current_position - 0.5).abs() < 1e-10);
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: 1.0,
+        });
+        assert!((obs.current_position - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn same_position_target_no_trade() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("100"),
+            candle_price("100"),
+        ];
+        let mut env =
+            ContinuousTradingEnv::new(candles, EnvConfig::default(), RewardConfig::default());
+        env.reset();
+        env.step(ContinuousAction {
+            position_target: 0.5,
+        });
+        // Same target again should not trigger a new trade
+        let (obs, _) = env.step(ContinuousAction {
+            position_target: 0.5,
+        });
+        assert!((obs.current_position - 0.5).abs() < 1e-10);
+    }
 }

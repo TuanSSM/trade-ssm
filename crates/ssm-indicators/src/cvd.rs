@@ -135,4 +135,75 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_cvd_trend_display() {
+        assert_eq!(CvdTrend::Bullish.to_string(), "BULLISH");
+        assert_eq!(CvdTrend::Bearish.to_string(), "BEARISH");
+        assert_eq!(CvdTrend::Neutral.to_string(), "NEUTRAL");
+    }
+
+    #[test]
+    fn test_cvd_empty_candles() {
+        let a = analyze_cvd(&[], 10);
+        assert_eq!(a.total_cvd, Decimal::ZERO);
+        assert_eq!(a.trend, CvdTrend::Neutral);
+        assert_eq!(a.window_size, 0);
+        assert!(a.deltas.is_empty());
+        assert!(a.cumulative.is_empty());
+    }
+
+    #[test]
+    fn test_cvd_single_candle() {
+        let candles = vec![candle("60", "40")];
+        let a = analyze_cvd(&candles, 1);
+        assert_eq!(a.trend, CvdTrend::Neutral); // less than 2 candles
+        assert_eq!(a.window_size, 1);
+        assert_eq!(a.total_cvd, Decimal::from(20));
+    }
+
+    #[test]
+    fn test_cvd_equal_buy_sell() {
+        let candles: Vec<_> = (0..10).map(|_| candle("50", "50")).collect();
+        let a = analyze_cvd(&candles, 10);
+        assert_eq!(a.trend, CvdTrend::Neutral);
+        assert_eq!(a.total_cvd, Decimal::ZERO);
+        for d in &a.deltas {
+            assert_eq!(*d, Decimal::ZERO);
+        }
+    }
+
+    #[test]
+    fn test_cvd_deltas_correct() {
+        let candles = vec![
+            candle("60", "40"),  // delta = 20
+            candle("30", "70"),  // delta = -40
+            candle("55", "45"),  // delta = 10
+        ];
+        let a = analyze_cvd(&candles, 3);
+        assert_eq!(a.deltas[0], Decimal::from(20));
+        assert_eq!(a.deltas[1], Decimal::from(-40));
+        assert_eq!(a.deltas[2], Decimal::from(10));
+    }
+
+    #[test]
+    fn test_cvd_cumulative_running_sum() {
+        let candles = vec![
+            candle("60", "40"),  // delta = 20,  cum = 20
+            candle("30", "70"),  // delta = -40, cum = -20
+            candle("55", "45"),  // delta = 10,  cum = -10
+        ];
+        let a = analyze_cvd(&candles, 3);
+        assert_eq!(a.cumulative[0], Decimal::from(20));
+        assert_eq!(a.cumulative[1], Decimal::from(-20));
+        assert_eq!(a.cumulative[2], Decimal::from(-10));
+    }
+
+    #[test]
+    fn test_cvd_window_larger_than_data() {
+        let candles: Vec<_> = (0..5).map(|_| candle("60", "40")).collect();
+        let a = analyze_cvd(&candles, 100);
+        assert_eq!(a.window_size, 5);
+        assert_eq!(a.deltas.len(), 5);
+    }
 }

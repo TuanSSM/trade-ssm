@@ -150,4 +150,122 @@ mod tests {
             .collect();
         assert!(rsi(&candles, 14).is_empty());
     }
+
+    #[test]
+    fn test_rsi_flat_market() {
+        // Constant price → no gains, no losses → RSI should be 50
+        let candles: Vec<_> = (0..20).map(|_| candle_close("100")).collect();
+        let result = rsi(&candles, 14);
+        assert!(!result.is_empty());
+        for val in &result {
+            let v = val.to_f64().unwrap();
+            assert!(
+                (v - 50.0).abs() < 0.01,
+                "RSI for flat market should be 50, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rsi_output_length() {
+        let candles: Vec<_> = (0..30)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let period = 14;
+        let result = rsi(&candles, period);
+        assert_eq!(result.len(), candles.len() - period);
+    }
+
+    #[test]
+    fn test_rsi_zero_period() {
+        let candles: Vec<_> = (0..10)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let result = rsi(&candles, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_rsi_extreme_overbought() {
+        // All candles strictly increasing => RSI near 100
+        let candles: Vec<_> = (0..30)
+            .map(|i| candle_close(&format!("{}", 100 + i * 10)))
+            .collect();
+        let result = rsi(&candles, 14);
+        assert!(!result.is_empty());
+        for val in &result {
+            let v = val.to_f64().unwrap();
+            assert!(
+                v > 95.0,
+                "RSI should be near 100 for extreme uptrend, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rsi_extreme_oversold() {
+        // All candles strictly decreasing => RSI near 0
+        let candles: Vec<_> = (0..30)
+            .map(|i| candle_close(&format!("{}", 500 - i * 10)))
+            .collect();
+        let result = rsi(&candles, 14);
+        assert!(!result.is_empty());
+        for val in &result {
+            let v = val.to_f64().unwrap();
+            assert!(
+                v < 5.0,
+                "RSI should be near 0 for extreme downtrend, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rsi_equal_gains_losses() {
+        // Alternating up and down by same amount => RSI should be near 50
+        let mut candles = Vec::new();
+        for i in 0..30 {
+            let price = if i % 2 == 0 { 100 } else { 110 };
+            candles.push(candle_close(&format!("{}", price)));
+        }
+        let result = rsi(&candles, 14);
+        assert!(!result.is_empty());
+        let last = result.last().unwrap().to_f64().unwrap();
+        assert!(
+            (last - 50.0).abs() < 5.0,
+            "RSI should be near 50 for equal gains/losses, got {last}"
+        );
+    }
+
+    #[test]
+    fn test_rsi_period_larger_than_data() {
+        let candles: Vec<_> = (0..10)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let result = rsi(&candles, 20);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_rsi_period_equals_data_len() {
+        // period == candles.len() => candles.len() <= period => empty
+        let candles: Vec<_> = (0..14)
+            .map(|i| candle_close(&format!("{}", 100 + i)))
+            .collect();
+        let result = rsi(&candles, 14);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_rsi_small_period() {
+        let candles: Vec<_> = (0..10)
+            .map(|i| candle_close(&format!("{}", 100 + i * 2)))
+            .collect();
+        let result = rsi(&candles, 2);
+        assert!(!result.is_empty());
+        // All up => RSI high
+        for val in &result {
+            let v = val.to_f64().unwrap();
+            assert!(v > 80.0, "RSI with small period in uptrend should be high, got {v}");
+        }
+    }
 }

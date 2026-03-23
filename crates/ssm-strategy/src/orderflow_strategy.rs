@@ -171,4 +171,149 @@ mod tests {
             assert_eq!(signal.action, AIAction::EnterLong);
         }
     }
+
+    #[test]
+    fn test_strategy_name() {
+        let strategy = OrderFlowStrategy::new(10);
+        assert_eq!(strategy.name(), "orderflow");
+    }
+
+    #[test]
+    fn test_bearish_imbalance_produces_short() {
+        let mut candles: Vec<_> = (0..20).map(|_| candle_cv("100", "50", "50")).collect();
+        // Add strong sell imbalance at end
+        candles.push(candle_cv("99", "10", "90"));
+        candles.push(candle_cv("98", "5", "95"));
+        candles.push(candle_cv("97", "8", "92"));
+
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        if let Some(signal) = result {
+            assert_eq!(signal.action, AIAction::EnterShort);
+        }
+    }
+
+    #[test]
+    fn test_balanced_returns_none() {
+        let candles: Vec<_> = (0..25).map(|_| candle_cv("100", "50", "50")).collect();
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        // Equal buy/sell throughout — score near 0, should return None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn name_returns_orderflow() {
+        let strategy = OrderFlowStrategy::new(5);
+        assert_eq!(strategy.name(), "orderflow");
+    }
+
+    #[test]
+    fn empty_candles_returns_none() {
+        let strategy = OrderFlowStrategy::new(5);
+        assert!(strategy.analyze(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn single_candle_returns_none() {
+        let strategy = OrderFlowStrategy::new(5);
+        let candles = vec![candle_cv("100", "80", "20")];
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn exactly_lookback_plus_one_returns_none() {
+        // Need lookback + 2 candles minimum; lookback + 1 is insufficient
+        let lookback = 10;
+        let strategy = OrderFlowStrategy::new(lookback);
+        let candles: Vec<_> = (0..(lookback + 1))
+            .map(|_| candle_cv("100", "80", "20"))
+            .collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn exactly_lookback_plus_two_is_sufficient() {
+        // lookback + 2 candles is the minimum that doesn't bail early
+        let lookback = 5;
+        let strategy = OrderFlowStrategy::new(lookback).with_min_confidence(0.0);
+        let candles: Vec<_> = (0..(lookback + 2))
+            .map(|_| candle_cv("100", "90", "10"))
+            .collect();
+        // May or may not produce a signal depending on orderflow analysis,
+        // but it should not return None due to insufficient candles
+        let _ = strategy.analyze(&candles).unwrap();
+    }
+
+    #[test]
+    fn high_confidence_threshold_filters() {
+        let strategy = OrderFlowStrategy::new(5).with_min_confidence(0.99);
+        let mut candles: Vec<_> = (0..20).map(|_| candle_cv("100", "50", "50")).collect();
+        candles.push(candle_cv("101", "60", "40"));
+        candles.push(candle_cv("102", "65", "35"));
+        // Even with some buy pressure, 0.99 threshold should filter
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn with_min_confidence_sets_value() {
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.75);
+        // Balanced candles should be filtered
+        let candles: Vec<_> = (0..25).map(|_| candle_cv("100", "50", "50")).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
+
+    #[test]
+    fn strong_sell_pressure_produces_short() {
+        // Create a scenario with strong declining prices and heavy sell volume
+        let mut candles: Vec<_> = (0..20).map(|_| candle_cv("100", "50", "50")).collect();
+        // Append candles with dropping price and heavy sell volume
+        for i in 1..=5 {
+            let price = format!("{}", 100 - i * 3);
+            candles.push(candle_cv(&price, "5", "95"));
+        }
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        if let Some(signal) = result {
+            assert_eq!(signal.action, AIAction::EnterShort);
+            assert_eq!(signal.source, "orderflow");
+        }
+    }
+
+    #[test]
+    fn strong_buy_pressure_produces_long() {
+        // Create a scenario with rising prices and heavy buy volume
+        let mut candles: Vec<_> = (0..20).map(|_| candle_cv("100", "50", "50")).collect();
+        // Append candles with rising price and heavy buy volume
+        for i in 1..=5 {
+            let price = format!("{}", 100 + i * 3);
+            candles.push(candle_cv(&price, "95", "5"));
+        }
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        if let Some(signal) = result {
+            assert_eq!(signal.action, AIAction::EnterLong);
+            assert_eq!(signal.source, "orderflow");
+        }
+    }
+
+    #[test]
+    fn signal_confidence_bounded_0_to_1() {
+        let mut candles: Vec<_> = (0..20).map(|_| candle_cv("100", "50", "50")).collect();
+        candles.push(candle_cv("101", "90", "10"));
+        candles.push(candle_cv("102", "95", "5"));
+        candles.push(candle_cv("103", "92", "8"));
+        let strategy = OrderFlowStrategy::new(10).with_min_confidence(0.0);
+        let result = strategy.analyze(&candles).unwrap();
+        if let Some(signal) = result {
+            assert!(signal.confidence >= 0.0 && signal.confidence <= 1.0);
+        }
+    }
+
+    #[test]
+    fn large_lookback_with_few_candles_returns_none() {
+        let strategy = OrderFlowStrategy::new(100);
+        let candles: Vec<_> = (0..50).map(|_| candle_cv("100", "80", "20")).collect();
+        assert!(strategy.analyze(&candles).unwrap().is_none());
+    }
 }

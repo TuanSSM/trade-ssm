@@ -143,4 +143,113 @@ mod tests {
         );
         assert_eq!(parsed.timeframes, cfg.timeframes);
     }
+
+    #[test]
+    fn env_config_custom_values() {
+        let cfg = EnvConfig {
+            fee_rate: 0.001,
+            slippage_rate: 0.0005,
+            initial_balance: 50_000.0,
+            position_size_pct: 0.5,
+            max_steps: Some(200),
+        };
+        assert!((cfg.fee_rate - 0.001).abs() < f64::EPSILON);
+        assert_eq!(cfg.max_steps, Some(200));
+        assert!((cfg.position_size_pct - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn env_config_serde_roundtrip() {
+        let cfg = EnvConfig {
+            fee_rate: 0.0004,
+            slippage_rate: 0.0001,
+            initial_balance: 25_000.0,
+            position_size_pct: 0.75,
+            max_steps: Some(500),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: EnvConfig = serde_json::from_str(&json).unwrap();
+        assert!((parsed.fee_rate - 0.0004).abs() < f64::EPSILON);
+        assert!((parsed.slippage_rate - 0.0001).abs() < f64::EPSILON);
+        assert_eq!(parsed.max_steps, Some(500));
+    }
+
+    #[test]
+    fn optimize_config_default() {
+        let cfg = OptimizeConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.objective, "SharpeRatio");
+        assert_eq!(cfg.method, "random");
+        assert_eq!(cfg.n_trials, 100);
+        assert_eq!(cfg.seed, 42);
+    }
+
+    #[test]
+    fn optimize_config_serde_roundtrip() {
+        let cfg = OptimizeConfig {
+            enabled: true,
+            objective: "TotalReturn".to_string(),
+            method: "grid".to_string(),
+            n_trials: 50,
+            seed: 123,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: OptimizeConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.objective, "TotalReturn");
+        assert_eq!(parsed.n_trials, 50);
+        assert_eq!(parsed.seed, 123);
+    }
+
+    #[test]
+    fn rl_config_default_timeframes() {
+        let cfg = RlConfig::default();
+        assert_eq!(cfg.timeframes.len(), 1);
+        assert_eq!(cfg.timeframes[0], "15m");
+    }
+
+    #[test]
+    fn reward_config_serde_roundtrip() {
+        let cfg = RewardConfig {
+            hold_penalty_threshold: 5,
+            hold_penalty_rate: 0.05,
+            invalid_action_penalty: 0.1,
+            close_penalty_threshold: 10,
+            close_penalty_rate: 0.02,
+            fee_penalty: true,
+            win_bonus: 0.5,
+            drawdown_penalty_rate: 0.03,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: RewardConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.hold_penalty_threshold, 5);
+        assert!((parsed.hold_penalty_rate - 0.05).abs() < f64::EPSILON);
+        assert!(parsed.fee_penalty);
+        assert!((parsed.win_bonus - 0.5).abs() < f64::EPSILON);
+        assert!((parsed.drawdown_penalty_rate - 0.03).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn env_config_max_steps_none_serde() {
+        let cfg = EnvConfig {
+            max_steps: None,
+            ..EnvConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: EnvConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.max_steps.is_none());
+    }
+
+    #[test]
+    fn rl_config_multiple_timeframes_serde() {
+        let cfg = RlConfig {
+            timeframes: vec!["3m".into(), "15m".into(), "1h".into(), "4h".into()],
+            ..RlConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: RlConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.timeframes.len(), 4);
+        assert_eq!(parsed.timeframes[0], "3m");
+        assert_eq!(parsed.timeframes[3], "4h");
+    }
 }
