@@ -13,3 +13,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
+
+[dev-dependencies]
+rust_decimal = { workspace = true }

@@ -1,11 +1,16 @@
 use anyhow::{bail, Context, Result};
 use rust_decimal::prelude::ToPrimitive;
-use ssm_core::Candle;
+use ssm_core::{AIAction, Candle, Signal};
 use ssm_exchange::history;
+use ssm_execution::backtest::{BacktestConfig, BacktestEngine};
 use ssm_indicators::cvd::{analyze_cvd, CvdTrend};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Usage: backtest --datafile user_data/BTCUSDT-15m-*.json [--window 15]
+///
+/// Set STRATEGY=cvd_momentum to run the full trade-simulation backtest engine
+/// instead of the default CVD replay mode.
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -18,6 +23,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| "15".into())
         .parse()
         .context("CVD_WINDOW must be integer")?;
+    let strategy = std::env::var("STRATEGY").ok();
 
     let path = PathBuf::from(&datafile);
     let candles = history::load_candles(&path)?;
@@ -34,16 +40,108 @@ fn main() -> Result<()> {
     tracing::info!(
         candles = candles.len(),
         window,
+        strategy = strategy.as_deref().unwrap_or("(cvd replay)"),
         file = %path.display(),
         "starting backtest"
     );
 
-    let results = run_backtest(&candles, window);
+    match strategy.as_deref() {
+        Some("cvd_momentum") => run_strategy_backtest(&candles, window, &path)?,
+        _ => run_cvd_replay(&candles, window, &path)?,
+    }
 
-    // Print summary
-    print_summary(&results);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Strategy-based backtest (BacktestEngine)
+// ---------------------------------------------------------------------------
+
+fn run_strategy_backtest(candles: &[Candle], window: usize, path: &Path) -> Result<()> {
+    let config = BacktestConfig::default();
+    let mut engine = BacktestEngine::new(config);
+
+    let mut prev_trend: Option<CvdTrend> = None;
+
+    let result = engine.run(candles, |closed| {
+        if closed.len() < window {
+            return None;
+        }
+        let cvd = analyze_cvd(closed, window);
+        let action = match prev_trend {
+            Some(prev) if prev != cvd.trend => match cvd.trend {
+                CvdTrend::Bullish => AIAction::EnterLong,
+                CvdTrend::Bearish => AIAction::EnterShort,
+                CvdTrend::Neutral => {
+                    // Exit whatever is open
+                    match prev {
+                        CvdTrend::Bullish => AIAction::ExitLong,
+                        CvdTrend::Bearish => AIAction::ExitShort,
+                        CvdTrend::Neutral => AIAction::Neutral,
+                    }
+                }
+            },
+            None => match cvd.trend {
+                CvdTrend::Bullish => AIAction::EnterLong,
+                CvdTrend::Bearish => AIAction::EnterShort,
+                CvdTrend::Neutral => AIAction::Neutral,
+            },
+            _ => AIAction::Neutral,
+        };
+
+        prev_trend = Some(cvd.trend);
+
+        if action == AIAction::Neutral {
+            return None;
+        }
+
+        let last = closed.last().unwrap();
+        Some(Signal {
+            timestamp: last.open_time,
+            symbol: String::from("BACKTEST"),
+            action,
+            confidence: 1.0,
+            source: String::from("cvd_momentum"),
+            metadata: HashMap::new(),
+        })
+    });
+
+    // Print strategy backtest summary
+    println!("=== Strategy Backtest: cvd_momentum ===");
+    println!("Total trades:      {}", result.total_trades);
+    println!("Winning trades:    {}", result.winning_trades);
+    println!("Losing trades:     {}", result.losing_trades);
+    println!("Win rate:          {:.1}%", result.win_rate * 100.0);
+    println!("Total profit:      {}", result.total_profit);
+    println!("Total profit %:    {:.2}%", result.total_profit_pct);
+    println!("Avg profit:        {}", result.avg_profit);
+    println!("Best trade:        {}", result.best_trade);
+    println!("Worst trade:       {}", result.worst_trade);
+    println!("Max drawdown:      {}", result.max_drawdown);
+    println!("Max drawdown %:    {:.2}%", result.max_drawdown_pct);
+    println!("Sharpe ratio:      {:.4}", result.sharpe_ratio);
+    println!("Sortino ratio:     {:.4}", result.sortino_ratio);
+    println!("Profit factor:     {}", result.profit_factor);
+    println!("Final balance:     {}", result.final_balance);
 
     // Write results JSON
+    let out_path = path.with_extension("strategy-backtest.json");
+    let file = std::fs::File::create(&out_path).context("creating output file")?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(file), &result)
+        .context("writing results")?;
+    tracing::info!(file = %out_path.display(), "strategy backtest results saved");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Legacy CVD replay mode (default)
+// ---------------------------------------------------------------------------
+
+fn run_cvd_replay(candles: &[Candle], window: usize, path: &Path) -> Result<()> {
+    let results = run_backtest(candles, window);
+    print_summary(&results);
+
     let out_path = path.with_extension("backtest.json");
     let file = std::fs::File::create(&out_path).context("creating output file")?;
     serde_json::to_writer_pretty(std::io::BufWriter::new(file), &results)

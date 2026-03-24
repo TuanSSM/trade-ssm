@@ -2,6 +2,7 @@ use anyhow::Result;
 use rust_decimal::Decimal;
 use ssm_core::{ExecutionMode, Order, OrderStatus, OrderType, Side, Signal};
 
+use crate::live::LiveEngine;
 use crate::paper::PaperEngine;
 use crate::position_tracker::PositionTracker;
 
@@ -10,6 +11,7 @@ pub struct ExecutionEngine {
     mode: ExecutionMode,
     paper: PaperEngine,
     positions: PositionTracker,
+    live: Option<LiveEngine>,
 }
 
 impl ExecutionEngine {
@@ -19,11 +21,48 @@ impl ExecutionEngine {
             mode,
             paper: PaperEngine::new(),
             positions: PositionTracker::new(),
+            live: None,
+        }
+    }
+
+    /// Create an engine with a LiveEngine attached for live execution.
+    pub fn with_live(live: LiveEngine) -> Self {
+        tracing::info!(mode = ?ExecutionMode::Live, "execution engine initialized with live backend");
+        Self {
+            mode: ExecutionMode::Live,
+            paper: PaperEngine::new(),
+            positions: PositionTracker::new(),
+            live: Some(live),
+        }
+    }
+
+    /// Create from environment: reads EXECUTION_MODE and, for live mode,
+    /// BINANCE_API_KEY / BINANCE_SECRET_KEY.
+    pub fn from_env() -> Result<Self> {
+        let mode = match std::env::var("EXECUTION_MODE")
+            .unwrap_or_else(|_| "paper".into())
+            .as_str()
+        {
+            "live" => ExecutionMode::Live,
+            _ => ExecutionMode::Paper,
+        };
+
+        match mode {
+            ExecutionMode::Live => {
+                let live = LiveEngine::from_env()?;
+                Ok(Self::with_live(live))
+            }
+            ExecutionMode::Paper => Ok(Self::new(ExecutionMode::Paper)),
         }
     }
 
     pub fn mode(&self) -> ExecutionMode {
         self.mode
+    }
+
+    /// Returns a reference to the LiveEngine, if configured.
+    pub fn live_engine(&self) -> Option<&LiveEngine> {
+        self.live.as_ref()
     }
 
     pub fn positions(&self) -> &PositionTracker {
@@ -65,7 +104,10 @@ impl ExecutionEngine {
         Ok(order)
     }
 
-    /// Submit a raw order (any type).
+    /// Submit a raw order synchronously (paper mode only).
+    ///
+    /// For live mode without a LiveEngine attached, the order stays Pending.
+    /// Use [`submit_order_async`] for live exchange execution.
     pub fn submit_order(&mut self, mut order: Order, current_price: Decimal) -> Result<Order> {
         match self.mode {
             ExecutionMode::Paper => {
@@ -75,12 +117,214 @@ impl ExecutionEngine {
                 }
             }
             ExecutionMode::Live => {
-                // Live execution would call exchange API here.
-                // For now, mark as pending — real integration in future.
-                tracing::warn!("live execution not yet implemented, order stays Pending");
+                // Sync path for live mode — order stays Pending.
+                // Use submit_order_async() for actual exchange execution.
+                tracing::warn!("live execution via sync path, order stays Pending — use submit_order_async for exchange execution");
             }
         }
         Ok(order)
+    }
+
+    /// Submit a raw order, routing to LiveEngine for live mode (async).
+    ///
+    /// - Paper mode: delegates to the synchronous paper engine.
+    /// - Live mode: calls the Binance Futures REST API via LiveEngine.
+    ///
+    /// After a successful fill (full or partial), the position tracker is updated.
+    pub async fn submit_order_async(
+        &mut self,
+        mut order: Order,
+        current_price: Decimal,
+    ) -> Result<Order> {
+        match self.mode {
+            ExecutionMode::Paper => {
+                self.paper.fill_order(&mut order, current_price)?;
+                if order.status == OrderStatus::Filled {
+                    self.positions.apply_fill(&order, current_price);
+                }
+            }
+            ExecutionMode::Live => {
+                let live = self
+                    .live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                live.submit_order(&mut order, current_price).await?;
+
+                // Update positions based on exchange response
+                match order.status {
+                    OrderStatus::Filled => {
+                        let fill_price = order.price.unwrap_or(current_price);
+                        self.positions.apply_fill(&order, fill_price);
+                    }
+                    OrderStatus::PartiallyFilled => {
+                        // For partial fills, query the actual filled quantity
+                        let (status, filled_qty) = live
+                            .query_order_detail(&order.symbol, &order.id)
+                            .await
+                            .unwrap_or((OrderStatus::PartiallyFilled, Decimal::ZERO));
+
+                        if filled_qty > Decimal::ZERO {
+                            let mut partial_order = order.clone();
+                            partial_order.quantity = filled_qty;
+                            let fill_price = order.price.unwrap_or(current_price);
+                            self.positions.apply_fill(&partial_order, fill_price);
+                        }
+                        order.status = status;
+                    }
+                    _ => {
+                        // Open, Rejected, etc. — no position update
+                    }
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    /// Submit an order derived from a Signal (async version for live mode).
+    pub async fn submit_signal_async(
+        &mut self,
+        signal: &Signal,
+        quantity: Decimal,
+        current_price: Decimal,
+    ) -> Result<Order> {
+        let side = match signal.action {
+            ssm_core::AIAction::EnterLong | ssm_core::AIAction::ExitShort => Side::Buy,
+            ssm_core::AIAction::EnterShort | ssm_core::AIAction::ExitLong => Side::Sell,
+            ssm_core::AIAction::Neutral => {
+                anyhow::bail!("cannot submit order for Neutral action")
+            }
+        };
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let order = Order {
+            id: format!("ssm-{now}"),
+            symbol: signal.symbol.clone(),
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            price: None,
+            stop_price: None,
+            trailing_delta: None,
+            time_in_force: None,
+            reduce_only: false,
+            status: OrderStatus::Pending,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let result = self.submit_order_async(order, current_price).await?;
+
+        tracing::info!(
+            order_id = %result.id,
+            symbol = %result.symbol,
+            side = %result.side,
+            qty = %result.quantity,
+            price = %current_price,
+            mode = ?self.mode,
+            source = %signal.source,
+            status = ?result.status,
+            "order executed (async)"
+        );
+
+        Ok(result)
+    }
+
+    /// Cancel an order on the exchange (live mode only).
+    ///
+    /// In paper mode this is a no-op that returns Ok.
+    pub async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+        match self.mode {
+            ExecutionMode::Paper => {
+                tracing::info!(order_id, symbol, "paper cancel (no-op)");
+                Ok(())
+            }
+            ExecutionMode::Live => {
+                let live = self
+                    .live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                live.cancel_order(symbol, order_id).await
+            }
+        }
+    }
+
+    /// Query the current status of an order on the exchange.
+    ///
+    /// In paper mode always returns `OrderStatus::Pending`.
+    pub async fn query_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
+        match self.mode {
+            ExecutionMode::Paper => {
+                tracing::debug!(order_id, symbol, "paper query — returning Pending");
+                Ok(OrderStatus::Pending)
+            }
+            ExecutionMode::Live => {
+                let live = self
+                    .live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                live.query_order(symbol, order_id).await
+            }
+        }
+    }
+
+    /// Pre-flight check: verify exchange connectivity, balance, and positions.
+    ///
+    /// Should be called before placing the first order in a session.
+    /// In paper mode this always succeeds.
+    pub async fn preflight_check(&self) -> Result<()> {
+        match self.mode {
+            ExecutionMode::Paper => {
+                tracing::info!("paper mode preflight — OK");
+                Ok(())
+            }
+            ExecutionMode::Live => {
+                let live = self
+                    .live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+
+                tracing::info!("running live preflight checks");
+
+                // Verify we can reach the exchange and authenticate
+                let balances = live
+                    .fetch_balance()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("preflight balance check failed: {e}"))?;
+
+                let total_available: Decimal = balances.iter().map(|b| b.available).sum();
+
+                tracing::info!(
+                    assets = balances.len(),
+                    total_available = %total_available,
+                    "balance check passed"
+                );
+
+                if total_available <= Decimal::ZERO {
+                    anyhow::bail!("preflight failed: no available balance");
+                }
+
+                // Fetch open positions
+                let positions = live
+                    .fetch_positions()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("preflight position check failed: {e}"))?;
+
+                tracing::info!(open_positions = positions.len(), "position check passed");
+
+                for pos in &positions {
+                    tracing::info!(
+                        symbol = %pos.symbol,
+                        amount = %pos.amount,
+                        entry_price = %pos.entry_price,
+                        leverage = pos.leverage,
+                        "existing position found"
+                    );
+                }
+
+                tracing::info!("preflight checks passed");
+                Ok(())
+            }
+        }
     }
 
     fn create_market_order(
@@ -392,5 +636,229 @@ mod tests {
             .submit_signal(&signal, Decimal::from(1), Decimal::from(50000))
             .unwrap_err();
         assert!(err.to_string().contains("Neutral"));
+    }
+
+    // --- Tests for TODO-001: Live Exchange Execution ---
+
+    #[test]
+    fn test_with_live_constructor() {
+        let live = LiveEngine::with_testnet("key".into(), "secret".into());
+        let engine = ExecutionEngine::with_live(live);
+        assert_eq!(engine.mode(), ExecutionMode::Live);
+        assert!(engine.live_engine().is_some());
+    }
+
+    #[test]
+    fn test_with_live_uses_testnet_url() {
+        let live = LiveEngine::with_testnet("key".into(), "secret".into());
+        let engine = ExecutionEngine::with_live(live);
+        assert_eq!(
+            engine.live_engine().unwrap().base_url(),
+            "https://testnet.binancefuture.com"
+        );
+    }
+
+    #[test]
+    fn test_new_paper_has_no_live_engine() {
+        let engine = ExecutionEngine::new(ExecutionMode::Paper);
+        assert!(engine.live_engine().is_none());
+    }
+
+    #[test]
+    fn test_new_live_without_backend_has_no_live_engine() {
+        let engine = ExecutionEngine::new(ExecutionMode::Live);
+        assert!(engine.live_engine().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_submit_order_async_paper_fills() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let order = Order {
+            id: "async-paper-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::from(1),
+            price: None,
+            stop_price: None,
+            trailing_delta: None,
+            time_in_force: None,
+            reduce_only: false,
+            status: OrderStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = engine
+            .submit_order_async(order, Decimal::from(50000))
+            .await
+            .unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert!(engine.positions().has_position("BTCUSDT"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_order_async_live_no_backend_errors() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Live);
+        let order = Order {
+            id: "async-live-nobackend".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::from(1),
+            price: None,
+            stop_price: None,
+            trailing_delta: None,
+            time_in_force: None,
+            reduce_only: false,
+            status: OrderStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = engine.submit_order_async(order, Decimal::from(50000)).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("live engine not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_order_paper_is_noop() {
+        let engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let result = engine.cancel_order("BTCUSDT", "order-1").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_order_live_no_backend_errors() {
+        let engine = ExecutionEngine::new(ExecutionMode::Live);
+        let result = engine.cancel_order("BTCUSDT", "order-1").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("live engine not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_query_order_status_paper_returns_pending() {
+        let engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let status = engine
+            .query_order_status("BTCUSDT", "order-1")
+            .await
+            .unwrap();
+        assert_eq!(status, OrderStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_query_order_status_live_no_backend_errors() {
+        let engine = ExecutionEngine::new(ExecutionMode::Live);
+        let result = engine.query_order_status("BTCUSDT", "order-1").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("live engine not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_preflight_check_paper_succeeds() {
+        let engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let result = engine.preflight_check().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_preflight_check_live_no_backend_errors() {
+        let engine = ExecutionEngine::new(ExecutionMode::Live);
+        let result = engine.preflight_check().await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("live engine not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_signal_async_paper_fills() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let signal = test_signal(ssm_core::AIAction::EnterLong);
+        let order = engine
+            .submit_signal_async(&signal, Decimal::from(1), Decimal::from(50000))
+            .await
+            .unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert!(engine.positions().has_position("BTCUSDT"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_signal_async_neutral_rejected() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let signal = test_signal(ssm_core::AIAction::Neutral);
+        let result = engine
+            .submit_signal_async(&signal, Decimal::from(1), Decimal::from(50000))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_submit_order_async_paper_limit_stays_open() {
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let order = Order {
+            id: "async-limit-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::from(1),
+            price: Some(Decimal::from(40000)),
+            stop_price: None,
+            trailing_delta: None,
+            time_in_force: None,
+            reduce_only: false,
+            status: OrderStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = engine
+            .submit_order_async(order, Decimal::from(50000))
+            .await
+            .unwrap();
+        assert_eq!(result.status, OrderStatus::Open);
+        assert!(!engine.positions().has_position("BTCUSDT"));
+    }
+
+    #[test]
+    fn test_paper_mode_sync_still_works_after_refactor() {
+        // Ensure the sync path for paper mode is unchanged
+        let mut engine = ExecutionEngine::new(ExecutionMode::Paper);
+        let signal = test_signal(ssm_core::AIAction::EnterLong);
+        let order = engine
+            .submit_signal(&signal, Decimal::from(1), Decimal::from(50000))
+            .unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.side, Side::Buy);
+        assert!(engine.positions().has_position("BTCUSDT"));
+    }
+
+    #[test]
+    fn test_live_mode_sync_backward_compat() {
+        // The sync submit_order in live mode still returns Pending (backward compat)
+        let mut engine = ExecutionEngine::new(ExecutionMode::Live);
+        let signal = test_signal(ssm_core::AIAction::EnterShort);
+        let order = engine
+            .submit_signal(&signal, Decimal::from(1), Decimal::from(50000))
+            .unwrap();
+        assert_eq!(order.status, OrderStatus::Pending);
+        assert!(!engine.positions().has_position("BTCUSDT"));
+    }
+
+    #[test]
+    fn test_with_live_mainnet() {
+        let live = LiveEngine::new("key".into(), "secret".into());
+        let engine = ExecutionEngine::with_live(live);
+        assert_eq!(
+            engine.live_engine().unwrap().base_url(),
+            "https://fapi.binance.com"
+        );
     }
 }

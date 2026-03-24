@@ -1,14 +1,18 @@
 use anyhow::Result;
-use ssm_core::{AIAction, Candle, Signal};
+use rust_decimal::Decimal;
+use ssm_core::{AIAction, Candle, ExitReason, Order, Position, RoiEntry, Signal, StoplossType};
 use ssm_indicators::cvd::{analyze_cvd, CvdTrend};
 
 use crate::traits::Strategy;
 
-/// Simple CVD momentum strategy — enters when CVD trend is clear.
-/// This is the default bot strategy (no AI required).
+/// CVD momentum strategy with full lifecycle callbacks.
+/// Demonstrates freqtrade-style callbacks: custom stoploss, ROI table,
+/// position sizing, DCA, and custom exit logic.
 pub struct CvdMomentumStrategy {
     window: usize,
-    min_confidence: f64,
+    pub min_confidence: f64,
+    dca_threshold: Decimal,
+    dca_quantity_pct: Decimal,
 }
 
 impl CvdMomentumStrategy {
@@ -16,6 +20,8 @@ impl CvdMomentumStrategy {
         Self {
             window,
             min_confidence: 0.6,
+            dca_threshold: Decimal::new(-3, 2), // DCA when position is -3%
+            dca_quantity_pct: Decimal::new(50, 2), // DCA 50% of original size
         }
     }
 
@@ -67,6 +73,93 @@ impl Strategy for CvdMomentumStrategy {
             source: self.name().into(),
             metadata: std::collections::HashMap::new(),
         }))
+    }
+
+    // --- Lifecycle callbacks ---
+
+    fn on_trade_enter(&self, signal: &Signal, _position: Option<&Position>) -> bool {
+        // Only enter if confidence is above threshold
+        signal.confidence >= self.min_confidence
+    }
+
+    fn on_trade_exit(&self, position: &Position, candles: &[Candle]) -> Option<ExitReason> {
+        if candles.len() < self.window {
+            return None;
+        }
+        // Exit if CVD trend reverses against our position
+        let cvd = analyze_cvd(candles, self.window);
+        match (position.side, cvd.trend) {
+            (ssm_core::Side::Buy, CvdTrend::Bearish) => {
+                Some(ExitReason::CustomExit("cvd_reversal".into()))
+            }
+            (ssm_core::Side::Sell, CvdTrend::Bullish) => {
+                Some(ExitReason::CustomExit("cvd_reversal".into()))
+            }
+            _ => None,
+        }
+    }
+
+    fn on_order_filled(&self, order: &Order, _position: &Position) {
+        tracing::info!(
+            order_id = %order.id,
+            symbol = %order.symbol,
+            side = %order.side,
+            "cvd_momentum: order filled"
+        );
+    }
+
+    fn custom_position_size(&self, _signal: &Signal, balance: Decimal) -> Option<Decimal> {
+        // Use 5% of balance per trade
+        Some(balance * Decimal::new(5, 2))
+    }
+
+    fn should_adjust_position(&self, position: &Position, _candles: &[Candle]) -> Option<Decimal> {
+        // DCA: add to position if unrealized PnL drops below threshold
+        if position.entry_price > Decimal::ZERO {
+            let pnl_pct = position.unrealized_pnl / (position.entry_price * position.quantity);
+            if pnl_pct < self.dca_threshold {
+                return Some(position.quantity * self.dca_quantity_pct);
+            }
+        }
+        None
+    }
+
+    fn custom_stoploss(
+        &self,
+        _position: &Position,
+        _candles: &[Candle],
+        candles_in_trade: usize,
+    ) -> Option<Decimal> {
+        // Time-based stoploss tightening
+        if candles_in_trade > 20 {
+            Some(Decimal::new(2, 2)) // Tighten to 2% after 20 candles
+        } else {
+            Some(Decimal::new(5, 2)) // Initial 5% stoploss
+        }
+    }
+
+    fn stoploss_type(&self) -> Option<StoplossType> {
+        Some(StoplossType::TimeBased {
+            initial_pct: Decimal::new(5, 2),
+            breakeven_after: 15,
+        })
+    }
+
+    fn roi_table(&self) -> Vec<RoiEntry> {
+        vec![
+            RoiEntry {
+                minutes: 0,
+                roi_pct: Decimal::new(10, 2), // 10% profit at any time
+            },
+            RoiEntry {
+                minutes: 60,
+                roi_pct: Decimal::new(5, 2), // 5% profit after 1 hour
+            },
+            RoiEntry {
+                minutes: 120,
+                roi_pct: Decimal::new(2, 2), // 2% profit after 2 hours
+            },
+        ]
     }
 }
 
@@ -264,5 +357,124 @@ mod tests {
             .with_min_confidence(0.7);
         // Last value should win (0.7)
         assert!((strategy.min_confidence - 0.7).abs() < f64::EPSILON);
+    }
+
+    // --- Lifecycle callback tests ---
+
+    fn make_signal(action: AIAction, confidence: f64) -> Signal {
+        Signal {
+            timestamp: 1000,
+            symbol: "BTCUSDT".into(),
+            action,
+            confidence,
+            source: "test".into(),
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_position(side: ssm_core::Side) -> ssm_core::Position {
+        ssm_core::Position {
+            symbol: "BTCUSDT".into(),
+            side,
+            entry_price: Decimal::from(50000),
+            quantity: Decimal::from(1),
+            unrealized_pnl: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+            leverage: 1,
+            opened_at: 0,
+        }
+    }
+
+    #[test]
+    fn on_trade_enter_accepts_high_confidence() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.5);
+        let signal = make_signal(AIAction::EnterLong, 0.8);
+        assert!(strategy.on_trade_enter(&signal, None));
+    }
+
+    #[test]
+    fn on_trade_enter_rejects_low_confidence() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.5);
+        let signal = make_signal(AIAction::EnterLong, 0.3);
+        assert!(!strategy.on_trade_enter(&signal, None));
+    }
+
+    #[test]
+    fn on_trade_exit_reversal() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let pos = make_position(ssm_core::Side::Buy);
+        // Bearish candles should trigger exit for a long position
+        let candles: Vec<_> = (0..10).map(|_| candle("20", "80")).collect();
+        let exit = strategy.on_trade_exit(&pos, &candles);
+        assert!(exit.is_some());
+        assert!(matches!(exit.unwrap(), ExitReason::CustomExit(_)));
+    }
+
+    #[test]
+    fn on_trade_exit_no_reversal() {
+        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let pos = make_position(ssm_core::Side::Buy);
+        // Bullish candles — no exit for a long position
+        let candles: Vec<_> = (0..10).map(|_| candle("80", "20")).collect();
+        assert!(strategy.on_trade_exit(&pos, &candles).is_none());
+    }
+
+    #[test]
+    fn custom_position_size_returns_5pct() {
+        let strategy = CvdMomentumStrategy::new(5);
+        let signal = make_signal(AIAction::EnterLong, 0.8);
+        let size = strategy.custom_position_size(&signal, Decimal::from(10000));
+        assert_eq!(size, Some(Decimal::from(500)));
+    }
+
+    #[test]
+    fn should_adjust_position_dca() {
+        let strategy = CvdMomentumStrategy::new(5);
+        let mut pos = make_position(ssm_core::Side::Buy);
+        pos.unrealized_pnl = Decimal::from(-2000); // -4% of 50000*1
+        let candles: Vec<_> = (0..10).map(|_| candle("50", "50")).collect();
+        let adj = strategy.should_adjust_position(&pos, &candles);
+        assert!(adj.is_some());
+        // Should be 50% of original quantity (1 * 0.5 = 0.5)
+        assert_eq!(adj.unwrap(), Decimal::new(50, 2));
+    }
+
+    #[test]
+    fn should_adjust_position_no_dca_when_profitable() {
+        let strategy = CvdMomentumStrategy::new(5);
+        let mut pos = make_position(ssm_core::Side::Buy);
+        pos.unrealized_pnl = Decimal::from(1000); // profitable
+        let candles: Vec<_> = (0..10).map(|_| candle("50", "50")).collect();
+        assert!(strategy.should_adjust_position(&pos, &candles).is_none());
+    }
+
+    #[test]
+    fn custom_stoploss_tightens_over_time() {
+        let strategy = CvdMomentumStrategy::new(5);
+        let pos = make_position(ssm_core::Side::Buy);
+        let candles: Vec<_> = (0..10).map(|_| candle("50", "50")).collect();
+
+        let early = strategy.custom_stoploss(&pos, &candles, 5);
+        assert_eq!(early, Some(Decimal::new(5, 2))); // 5%
+
+        let late = strategy.custom_stoploss(&pos, &candles, 25);
+        assert_eq!(late, Some(Decimal::new(2, 2))); // 2%
+    }
+
+    #[test]
+    fn stoploss_type_returns_time_based() {
+        let strategy = CvdMomentumStrategy::new(5);
+        let sl = strategy.stoploss_type();
+        assert!(sl.is_some());
+        assert!(matches!(sl.unwrap(), StoplossType::TimeBased { .. }));
+    }
+
+    #[test]
+    fn roi_table_has_entries() {
+        let strategy = CvdMomentumStrategy::new(5);
+        let roi = strategy.roi_table();
+        assert_eq!(roi.len(), 3);
+        assert_eq!(roi[0].minutes, 0);
+        assert_eq!(roi[0].roi_pct, Decimal::new(10, 2));
     }
 }

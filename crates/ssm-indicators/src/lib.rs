@@ -5,5 +5,6 @@ pub mod ema;
 pub mod liquidations;
 pub mod macd;
 pub mod obv;
+pub mod plot;
 pub mod rsi;
 pub mod vwap;
