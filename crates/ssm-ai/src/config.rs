@@ -17,6 +17,14 @@ pub struct EnvConfig {
     pub hedge_mode: bool,
     /// Maximum gross exposure as fraction of balance (long + short combined).
     pub max_gross_exposure: f64,
+    /// Append environment state (position, PnL, duration, exposure) to the
+    /// observation feature vector. FreqAI's `add_state_info` equivalent.
+    #[serde(default)]
+    pub add_state_info: bool,
+    /// Maximum candles a position can be held before forced exit.
+    /// None = no limit. FreqAI's `max_trade_duration_candles`.
+    #[serde(default)]
+    pub max_trade_duration_candles: Option<usize>,
 }
 
 impl Default for EnvConfig {
@@ -29,6 +37,8 @@ impl Default for EnvConfig {
             max_steps: None,
             hedge_mode: false,
             max_gross_exposure: 2.0,
+            add_state_info: false,
+            max_trade_duration_candles: None,
         }
     }
 }
@@ -174,6 +184,8 @@ mod tests {
             max_steps: Some(200),
             hedge_mode: false,
             max_gross_exposure: 2.0,
+            add_state_info: false,
+            max_trade_duration_candles: None,
         };
         assert!((cfg.fee_rate - 0.001).abs() < f64::EPSILON);
         assert_eq!(cfg.max_steps, Some(200));
@@ -190,6 +202,8 @@ mod tests {
             max_steps: Some(500),
             hedge_mode: false,
             max_gross_exposure: 2.0,
+            add_state_info: false,
+            max_trade_duration_candles: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: EnvConfig = serde_json::from_str(&json).unwrap();

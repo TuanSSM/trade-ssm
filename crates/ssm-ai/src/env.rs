@@ -3,6 +3,7 @@ use ssm_core::{AIAction, Candle, Side};
 
 use crate::config::{EnvConfig, RewardConfig};
 use crate::metrics::{CompletedTrade, EpisodeMetrics, MetricsAccumulator};
+use crate::reward::{DefaultRewardFn, PositionInfo, RewardContext, RewardFn, TradeResult};
 
 /// Reinforcement learning environment (FreqAI Base5Action inspired).
 ///
@@ -20,6 +21,7 @@ pub struct TradingEnv {
     balance: f64,
     metrics: MetricsAccumulator,
     equity_peak: f64,
+    reward_fn: Box<dyn RewardFn>,
 }
 
 struct EnvPosition {
@@ -27,6 +29,9 @@ struct EnvPosition {
     entry_price: f64,
     entry_step: usize,
 }
+
+/// Number of state features appended when `add_state_info` is enabled.
+pub const STATE_INFO_COUNT: usize = 8;
 
 /// Observation returned to the agent after each step.
 #[derive(Debug, Clone)]
@@ -55,6 +60,32 @@ pub struct Observation {
     pub gross_exposure: f64,
 }
 
+impl Observation {
+    /// Convert environment state into feature values for model input.
+    ///
+    /// Returns 8 features (STATE_INFO_COUNT):
+    ///   0: long_active (0.0 or 1.0)
+    ///   1: short_active (0.0 or 1.0)
+    ///   2: long_unrealized_pnl
+    ///   3: short_unrealized_pnl
+    ///   4: long_hold_duration (normalized by 100)
+    ///   5: short_hold_duration (normalized by 100)
+    ///   6: net_exposure
+    ///   7: gross_exposure
+    pub fn to_state_features(&self) -> Vec<f64> {
+        vec![
+            if self.long_position_active { 1.0 } else { 0.0 },
+            if self.short_position_active { 1.0 } else { 0.0 },
+            self.long_unrealized_pnl,
+            self.short_unrealized_pnl,
+            self.long_hold_duration as f64 / 100.0,
+            self.short_hold_duration as f64 / 100.0,
+            self.net_exposure,
+            self.gross_exposure,
+        ]
+    }
+}
+
 impl TradingEnv {
     /// Create environment with default configuration (backward compatible).
     pub fn new(candles: Vec<Candle>) -> Self {
@@ -66,6 +97,16 @@ impl TradingEnv {
         candles: Vec<Candle>,
         config: EnvConfig,
         reward_config: RewardConfig,
+    ) -> Self {
+        Self::with_reward_fn(candles, config, reward_config, Box::new(DefaultRewardFn))
+    }
+
+    /// Create environment with custom configuration and reward function.
+    pub fn with_reward_fn(
+        candles: Vec<Candle>,
+        config: EnvConfig,
+        reward_config: RewardConfig,
+        reward_fn: Box<dyn RewardFn>,
     ) -> Self {
         let first_price = candles
             .first()
@@ -84,6 +125,7 @@ impl TradingEnv {
             equity_peak: balance,
             config,
             reward_config,
+            reward_fn,
         }
     }
 
@@ -143,13 +185,29 @@ impl TradingEnv {
         long_frac + short_frac
     }
 
+    /// Build a complete feature vector for the agent, optionally appending state info.
+    ///
+    /// `candle_features` is the raw feature vector from `extract_features()`.
+    /// When `add_state_info` is enabled, appends 8 state features (position, PnL, etc.).
+    pub fn build_agent_input(&self, candle_features: &[f64]) -> Vec<f64> {
+        if self.config.add_state_info {
+            let obs = self.observe();
+            let mut v = candle_features.to_vec();
+            v.extend(obs.to_state_features());
+            v
+        } else {
+            candle_features.to_vec()
+        }
+    }
+
     /// Take an action, advance one candle, return (observation, reward).
     pub fn step(&mut self, action: AIAction) -> (Observation, f64) {
         let price = self.current_price();
-        let mut reward = 0.0;
+        let mut trade_results = Vec::new();
+        let mut action_was_invalid = false;
 
+        // --- Process agent action: position management side effects ---
         if self.config.hedge_mode {
-            // --- Hedge mode: long and short are independent ---
             match action {
                 AIAction::EnterLong if self.long_position.is_none() => {
                     let new_gross = self.gross_exposure() + self.config.position_size_pct;
@@ -161,7 +219,7 @@ impl TradingEnv {
                             entry_step: self.step,
                         });
                     } else {
-                        reward = -self.reward_config.invalid_action_penalty;
+                        action_was_invalid = true;
                     }
                 }
                 AIAction::EnterShort if self.short_position.is_none() => {
@@ -174,56 +232,25 @@ impl TradingEnv {
                             entry_step: self.step,
                         });
                     } else {
-                        reward = -self.reward_config.invalid_action_penalty;
+                        action_was_invalid = true;
                     }
                 }
                 AIAction::ExitLong if self.long_position.is_some() => {
                     if let Some(pos) = self.long_position.take() {
-                        reward = self.close_side_position(pos, price);
+                        trade_results.push(self.close_position_record(pos, price));
                     }
                 }
                 AIAction::ExitShort if self.short_position.is_some() => {
                     if let Some(pos) = self.short_position.take() {
-                        reward = self.close_side_position(pos, price);
+                        trade_results.push(self.close_position_record(pos, price));
                     }
                 }
-                AIAction::Neutral => {
-                    // Sum hold penalties from both positions independently
-                    for pos in [&self.long_position, &self.short_position]
-                        .into_iter()
-                        .flatten()
-                    {
-                        let duration = self.step - pos.entry_step;
-                        if duration > self.reward_config.hold_penalty_threshold {
-                            reward -= self.reward_config.hold_penalty_rate * duration as f64;
-                        }
-                    }
-                }
+                AIAction::Neutral => {}
                 _ => {
-                    reward = -self.reward_config.invalid_action_penalty;
+                    action_was_invalid = true;
                 }
-            }
-
-            // Exposure penalty
-            let gross = self.gross_exposure();
-            if self.reward_config.exposure_penalty_rate > 0.0
-                && gross > self.reward_config.exposure_penalty_threshold
-            {
-                reward -= self.reward_config.exposure_penalty_rate
-                    * (gross - self.reward_config.exposure_penalty_threshold);
-            }
-
-            // Hedge bonus
-            if self.long_position.is_some()
-                && self.short_position.is_some()
-                && self.reward_config.hedge_bonus > 0.0
-            {
-                let long_frac = self.config.position_size_pct;
-                let short_frac = self.config.position_size_pct;
-                reward += self.reward_config.hedge_bonus * long_frac.min(short_frac);
             }
         } else {
-            // --- One-way mode: mutual exclusivity preserved ---
             match action {
                 AIAction::EnterLong if self.is_flat() => {
                     let slipped = price * (1.0 + self.config.slippage_rate);
@@ -243,43 +270,76 @@ impl TradingEnv {
                 }
                 AIAction::ExitLong if self.long_position.is_some() => {
                     if let Some(pos) = self.long_position.take() {
-                        reward = self.close_side_position(pos, price);
+                        trade_results.push(self.close_position_record(pos, price));
                     }
                 }
                 AIAction::ExitShort if self.short_position.is_some() => {
                     if let Some(pos) = self.short_position.take() {
-                        reward = self.close_side_position(pos, price);
+                        trade_results.push(self.close_position_record(pos, price));
                     }
                 }
-                AIAction::Neutral => {
-                    // Check whichever position is open (at most one in one-way mode)
-                    for pos in [&self.long_position, &self.short_position]
-                        .into_iter()
-                        .flatten()
-                    {
-                        let duration = self.step - pos.entry_step;
-                        if duration > self.reward_config.hold_penalty_threshold {
-                            reward = -self.reward_config.hold_penalty_rate * duration as f64;
-                        }
-                    }
-                }
+                AIAction::Neutral => {}
                 _ => {
-                    reward = -self.reward_config.invalid_action_penalty;
+                    action_was_invalid = true;
                 }
             }
         }
 
-        // Apply drawdown penalty
+        // --- Auto-exit positions exceeding max_trade_duration_candles ---
+        if let Some(max_dur) = self.config.max_trade_duration_candles {
+            if self
+                .long_position
+                .as_ref()
+                .is_some_and(|p| self.step - p.entry_step >= max_dur)
+            {
+                let pos = self.long_position.take().unwrap();
+                trade_results.push(self.close_position_record(pos, price));
+            }
+            if self
+                .short_position
+                .as_ref()
+                .is_some_and(|p| self.step - p.entry_step >= max_dur)
+            {
+                let pos = self.short_position.take().unwrap();
+                trade_results.push(self.close_position_record(pos, price));
+            }
+        }
+
+        // --- Compute equity for drawdown tracking ---
         let equity = self.compute_equity();
         if equity > self.equity_peak {
             self.equity_peak = equity;
         }
-        if self.reward_config.drawdown_penalty_rate > 0.0 && self.equity_peak > 0.0 {
-            let drawdown = (self.equity_peak - equity) / self.equity_peak;
-            if drawdown > 0.0 {
-                reward -= drawdown * self.reward_config.drawdown_penalty_rate;
-            }
-        }
+
+        // --- Build reward context and delegate to reward function ---
+        let ctx = RewardContext {
+            action,
+            price,
+            balance: self.balance,
+            equity,
+            equity_peak: self.equity_peak,
+            long_position: self.long_position.as_ref().map(|p| PositionInfo {
+                side: p.side,
+                entry_price: p.entry_price,
+                entry_step: p.entry_step,
+                unrealized_pnl_pct: Self::pnl_pct_for(p, price),
+                hold_duration: self.step - p.entry_step,
+            }),
+            short_position: self.short_position.as_ref().map(|p| PositionInfo {
+                side: p.side,
+                entry_price: p.entry_price,
+                entry_step: p.entry_step,
+                unrealized_pnl_pct: Self::pnl_pct_for(p, price),
+                hold_duration: self.step - p.entry_step,
+            }),
+            trade_results,
+            gross_exposure: self.gross_exposure(),
+            hedge_mode: self.config.hedge_mode,
+            step: self.step,
+            action_was_invalid,
+        };
+
+        let reward = self.reward_fn.calculate(&ctx, &self.reward_config);
 
         self.total_reward += reward;
         self.step += 1;
@@ -290,33 +350,28 @@ impl TradingEnv {
         (self.observe(), reward)
     }
 
-    /// Close a specific position (taken by value from `.take()`), update balance/metrics, return reward.
-    fn close_side_position(&mut self, pos: EnvPosition, exit_price: f64) -> f64 {
+    /// Close a position: update balance/metrics/trade_count, return TradeResult for reward.
+    fn close_position_record(&mut self, pos: EnvPosition, exit_price: f64) -> TradeResult {
         self.trade_count += 1;
         let duration = self.step - pos.entry_step;
 
-        // Apply slippage to exit
         let effective_exit = match pos.side {
             Side::Buy => exit_price * (1.0 - self.config.slippage_rate),
             Side::Sell => exit_price * (1.0 + self.config.slippage_rate),
         };
 
-        // Compute raw PnL percentage
         let pnl_pct = match pos.side {
             Side::Buy => (effective_exit - pos.entry_price) / pos.entry_price,
             Side::Sell => (pos.entry_price - effective_exit) / pos.entry_price,
         };
 
-        // Compute fees on both entry and exit
         let notional = self.balance * self.config.position_size_pct;
         let fees = 2.0 * self.config.fee_rate * notional;
         let pnl_dollar = pnl_pct * notional - fees;
 
-        // Update balance
         self.balance += pnl_dollar;
         self.metrics.set_balance(self.balance);
 
-        // Record trade
         self.metrics.record_trade(CompletedTrade {
             side: pos.side,
             entry_price: pos.entry_price,
@@ -326,27 +381,12 @@ impl TradingEnv {
             fees,
         });
 
-        // Compute reward
-        let duration_penalty = if duration > self.reward_config.close_penalty_threshold {
-            self.reward_config.close_penalty_rate * duration as f64
-        } else {
-            0.0
-        };
-
-        let fee_penalty = if self.reward_config.fee_penalty {
-            2.0 * self.config.fee_rate
-        } else {
-            0.0
-        };
-
-        let mut reward = pnl_pct - duration_penalty - fee_penalty;
-
-        // Win bonus
-        if pnl_pct > 0.0 && self.reward_config.win_bonus > 0.0 {
-            reward += pnl_pct * self.reward_config.win_bonus;
+        TradeResult {
+            side: pos.side,
+            pnl_pct,
+            duration,
+            fees: 2.0 * self.config.fee_rate,
         }
-
-        reward
     }
 
     fn current_price(&self) -> f64 {
@@ -1176,5 +1216,162 @@ mod tests {
         assert_eq!(env.trade_count(), 2);
         let metrics = env.episode_metrics(35040.0);
         assert_eq!(metrics.total_trades, 2);
+    }
+
+    // --- State info and auto-exit tests ---
+
+    #[test]
+    fn state_features_correct_count() {
+        let candles = vec![candle_price("100"), candle_price("110")];
+        let mut env = TradingEnv::new(candles);
+        let obs = env.reset();
+        let sf = obs.to_state_features();
+        assert_eq!(sf.len(), STATE_INFO_COUNT);
+    }
+
+    #[test]
+    fn state_features_reflect_position() {
+        let candles = vec![
+            candle_price("100"),
+            candle_price("110"),
+            candle_price("120"),
+        ];
+        let mut env = TradingEnv::new(candles);
+        env.reset();
+
+        let (obs, _) = env.step(AIAction::EnterLong);
+        let sf = obs.to_state_features();
+        assert!((sf[0] - 1.0).abs() < f64::EPSILON, "long should be active");
+        assert!(
+            (sf[1] - 0.0).abs() < f64::EPSILON,
+            "short should be inactive"
+        );
+        assert!(sf[2] > 0.0, "long should have positive unrealized PnL");
+    }
+
+    #[test]
+    fn build_agent_input_without_state_info() {
+        let candles = vec![candle_price("100"), candle_price("110")];
+        let mut env = TradingEnv::new(candles); // add_state_info defaults to false
+        env.reset();
+
+        let feats = vec![1.0, 2.0, 3.0];
+        let input = env.build_agent_input(&feats);
+        assert_eq!(input.len(), 3, "should not append state info");
+    }
+
+    #[test]
+    fn build_agent_input_with_state_info() {
+        let candles = vec![candle_price("100"), candle_price("110")];
+        let env_cfg = EnvConfig {
+            add_state_info: true,
+            ..EnvConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, RewardConfig::default());
+        env.reset();
+
+        let feats = vec![1.0, 2.0, 3.0];
+        let input = env.build_agent_input(&feats);
+        assert_eq!(
+            input.len(),
+            3 + STATE_INFO_COUNT,
+            "should append state info"
+        );
+    }
+
+    #[test]
+    fn max_trade_duration_auto_exits() {
+        let candles: Vec<_> = (0..20).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            max_trade_duration_candles: Some(3),
+            ..EnvConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, RewardConfig::default());
+        env.reset();
+
+        env.step(AIAction::EnterLong); // step 0
+
+        // Steps 1 and 2 — position still open (duration < 3)
+        let (obs, _) = env.step(AIAction::Neutral);
+        assert!(obs.position_side.is_some());
+        let (obs, _) = env.step(AIAction::Neutral);
+        assert!(obs.position_side.is_some());
+
+        // Step 3 — duration = 3, should auto-exit
+        let (obs, _) = env.step(AIAction::Neutral);
+        assert!(
+            obs.position_side.is_none(),
+            "position should be auto-closed after max duration"
+        );
+        assert_eq!(env.trade_count(), 1);
+    }
+
+    #[test]
+    fn max_trade_duration_none_no_auto_exit() {
+        let candles: Vec<_> = (0..20).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            max_trade_duration_candles: None,
+            ..EnvConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, RewardConfig::default());
+        env.reset();
+
+        env.step(AIAction::EnterLong);
+        for _ in 0..15 {
+            let (obs, _) = env.step(AIAction::Neutral);
+            if !obs.done {
+                assert!(obs.position_side.is_some(), "position should remain open");
+            }
+        }
+    }
+
+    #[test]
+    fn max_trade_duration_hedge_mode_both_sides() {
+        let candles: Vec<_> = (0..20).map(|_| candle_price("100")).collect();
+        let env_cfg = EnvConfig {
+            hedge_mode: true,
+            max_trade_duration_candles: Some(3),
+            ..EnvConfig::default()
+        };
+        let mut env = TradingEnv::with_config(candles, env_cfg, RewardConfig::default());
+        env.reset();
+
+        env.step(AIAction::EnterLong); // step 0
+        env.step(AIAction::EnterShort); // step 1
+
+        // Step 2: long_dur=2, short_dur=1
+        env.step(AIAction::Neutral);
+        // Step 3: long_dur=3 -> auto-exit long, short_dur=2
+        let (obs, _) = env.step(AIAction::Neutral);
+        assert!(!obs.long_position_active, "long should be auto-closed");
+        assert!(obs.short_position_active, "short should still be open");
+        assert_eq!(env.trade_count(), 1);
+    }
+
+    #[test]
+    fn custom_reward_fn_in_env() {
+        use crate::reward::RewardFn;
+
+        struct AlwaysOne;
+        impl RewardFn for AlwaysOne {
+            fn calculate(
+                &self,
+                _ctx: &crate::reward::RewardContext,
+                _config: &RewardConfig,
+            ) -> f64 {
+                1.0
+            }
+        }
+
+        let candles = vec![candle_price("100"), candle_price("110")];
+        let mut env = TradingEnv::with_reward_fn(
+            candles,
+            EnvConfig::default(),
+            RewardConfig::default(),
+            Box::new(AlwaysOne),
+        );
+        env.reset();
+        let (_, reward) = env.step(AIAction::Neutral);
+        assert!((reward - 1.0).abs() < f64::EPSILON);
     }
 }
