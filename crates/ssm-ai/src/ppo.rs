@@ -757,8 +757,10 @@ mod tests {
 
     #[test]
     fn ppo_config_net_arch_serde() {
-        let mut config = PpoConfig::default();
-        config.net_arch = vec![256, 128, 64];
+        let config = PpoConfig {
+            net_arch: vec![256, 128, 64],
+            ..PpoConfig::default()
+        };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: PpoConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.net_arch, vec![256, 128, 64]);
