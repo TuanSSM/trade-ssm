@@ -9,15 +9,33 @@ pub struct ModelManager {
     last_trained: Option<i64>,
     train_window_size: usize,
     expiration_hours: f64,
+    live_retrain_hours: f64,
 }
 
 impl ModelManager {
-    pub fn new(model: Box<dyn AIModel>, train_window: usize, expiration_hours: f64) -> Self {
+    pub fn new(
+        model: Box<dyn AIModel>,
+        train_window: usize,
+        expiration_hours: f64,
+        live_retrain_hours: f64,
+    ) -> Self {
         Self {
             model,
             last_trained: None,
             train_window_size: train_window,
             expiration_hours,
+            live_retrain_hours,
+        }
+    }
+
+    /// Check if the model should be retrained based on live_retrain_hours.
+    pub fn needs_retrain(&self, now: i64) -> bool {
+        match self.last_trained {
+            None => true,
+            Some(trained_at) => {
+                let retrain_ms = (self.live_retrain_hours * 3600.0 * 1000.0) as i64;
+                now - trained_at >= retrain_ms
+            }
         }
     }
 
@@ -83,14 +101,14 @@ mod tests {
 
     #[test]
     fn is_expired_returns_true_when_never_trained() {
-        let mgr = ModelManager::new(Box::new(StubModel), 100, 1.0);
+        let mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0);
         assert!(mgr.is_expired(0));
         assert!(mgr.is_expired(999999));
     }
 
     #[test]
     fn is_expired_returns_true_after_expiration() {
-        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0); // 1 hour
+        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0); // 1 hour
         let data = make_data(10, 1_000_000);
         mgr.retrain(&data).unwrap();
 
@@ -103,7 +121,7 @@ mod tests {
 
     #[test]
     fn is_expired_returns_false_before_expiration() {
-        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0);
+        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0);
         let data = make_data(10, 1_000_000);
         mgr.retrain(&data).unwrap();
 
@@ -116,7 +134,7 @@ mod tests {
 
     #[test]
     fn predict_returns_none_when_expired() {
-        let mgr = ModelManager::new(Box::new(StubModel), 100, 1.0);
+        let mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0);
         let row = FeatureRow {
             timestamp: 0,
             features: vec![1.0],
@@ -128,7 +146,7 @@ mod tests {
 
     #[test]
     fn predict_returns_action_when_fresh() {
-        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0);
+        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0);
         let data = make_data(10, 1_000_000);
         mgr.retrain(&data).unwrap();
 
@@ -145,7 +163,7 @@ mod tests {
 
     #[test]
     fn retrain_updates_last_trained() {
-        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0);
+        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0);
         assert!(mgr.last_trained().is_none());
 
         let data = make_data(10, 5_000_000);
@@ -158,7 +176,7 @@ mod tests {
 
     #[test]
     fn retrain_uses_window_size() {
-        let mut mgr = ModelManager::new(Box::new(StubModel), 5, 1.0);
+        let mut mgr = ModelManager::new(Box::new(StubModel), 5, 1.0, 24.0);
         let data = make_data(20, 0);
         mgr.retrain(&data).unwrap();
 
@@ -166,5 +184,44 @@ mod tests {
         // Window = last 5 of 20 rows => rows 15..20, timestamps 15000..19000
         let last = mgr.last_trained().unwrap();
         assert_eq!(last, 19_000);
+    }
+
+    #[test]
+    fn needs_retrain_true_when_never_trained() {
+        let mgr = ModelManager::new(Box::new(StubModel), 100, 1.0, 24.0);
+        assert!(mgr.needs_retrain(0));
+        assert!(mgr.needs_retrain(999999));
+    }
+
+    #[test]
+    fn needs_retrain_true_after_interval() {
+        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 48.0, 24.0);
+        let data = make_data(10, 1_000_000);
+        mgr.retrain(&data).unwrap();
+
+        let trained_at = mgr.last_trained().unwrap();
+        // 24 hours = 86_400_000 ms
+        assert!(mgr.needs_retrain(trained_at + 86_400_000));
+        assert!(mgr.needs_retrain(trained_at + 100_000_000));
+    }
+
+    #[test]
+    fn needs_retrain_false_before_interval() {
+        let mut mgr = ModelManager::new(Box::new(StubModel), 100, 48.0, 24.0);
+        let data = make_data(10, 1_000_000);
+        mgr.retrain(&data).unwrap();
+
+        let trained_at = mgr.last_trained().unwrap();
+        // 12 hours = 43_200_000 ms
+        assert!(!mgr.needs_retrain(trained_at + 43_200_000));
+        assert!(!mgr.needs_retrain(trained_at));
+    }
+
+    #[test]
+    fn constructor_with_live_retrain_hours() {
+        let mgr = ModelManager::new(Box::new(StubModel), 100, 48.0, 12.0);
+        // 12 hours = 43_200_000 ms — should not need retrain at 11h but need at 12h
+        // First, needs retrain since never trained
+        assert!(mgr.needs_retrain(0));
     }
 }

@@ -5,6 +5,10 @@ use std::path::Path;
 
 use crate::model::{AIModel, TrainMetrics};
 
+fn default_net_arch() -> Vec<usize> {
+    vec![128, 128]
+}
+
 /// PPO agent configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PpoConfig {
@@ -18,6 +22,10 @@ pub struct PpoConfig {
     pub max_grad_norm: f64,
     pub batch_size: usize,
     pub epochs_per_update: usize,
+    /// Hidden layer sizes for future deep MLP policy/value networks.
+    /// Stored for checkpoint persistence; the current linear agent does not use it.
+    #[serde(default = "default_net_arch")]
+    pub net_arch: Vec<usize>,
 }
 
 impl Default for PpoConfig {
@@ -33,6 +41,7 @@ impl Default for PpoConfig {
             max_grad_norm: 0.5,
             batch_size: 64,
             epochs_per_update: 4,
+            net_arch: default_net_arch(),
         }
     }
 }
@@ -375,6 +384,7 @@ impl AIModel for PpoAgent {
             value_weights: self.value_weights.clone(),
             value_bias: self.value_bias,
             total_updates: self.total_updates,
+            net_arch: self.config.net_arch.clone(),
         };
         let json = serde_json::to_string_pretty(&checkpoint)?;
         std::fs::write(path, json)?;
@@ -402,6 +412,9 @@ struct PpoCheckpoint {
     value_weights: Vec<f64>,
     value_bias: f64,
     total_updates: usize,
+    /// Hidden layer sizes, persisted for checkpoint compatibility.
+    #[serde(default = "default_net_arch")]
+    net_arch: Vec<usize>,
 }
 
 /// Compute softmax probabilities from logits.
@@ -718,6 +731,37 @@ mod tests {
         assert!(config.max_grad_norm > 0.0);
         assert!(config.batch_size > 0);
         assert!(config.epochs_per_update > 0);
+    }
+
+    #[test]
+    fn ppo_config_net_arch_default() {
+        let config = PpoConfig::default();
+        assert_eq!(config.net_arch, vec![128, 128]);
+    }
+
+    #[test]
+    fn ppo_checkpoint_preserves_net_arch() {
+        let mut agent = default_agent();
+        agent.config.net_arch = vec![64, 64, 32];
+        agent.policy_weights[0][0] = 0.1;
+
+        let path = std::env::temp_dir().join("ppo_net_arch_test.json");
+        agent.save(&path).unwrap();
+
+        let mut loaded = default_agent();
+        loaded.load(&path).unwrap();
+        assert_eq!(loaded.config.net_arch, vec![64, 64, 32]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ppo_config_net_arch_serde() {
+        let mut config = PpoConfig::default();
+        config.net_arch = vec![256, 128, 64];
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: PpoConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.net_arch, vec![256, 128, 64]);
     }
 
     #[test]

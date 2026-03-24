@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use ssm_core::{AIAction, Candle, FeatureRow};
 
-use crate::config::{EnvConfig, RewardConfig};
+use crate::config::{EnvConfig, RewardConfig, TrainingConfig};
 use crate::env::{TradingEnv, STATE_INFO_COUNT};
 use crate::episode_sampler::EpisodeSampler;
-use crate::features::{extract_features, FEATURE_COUNT};
+use crate::features::{drop_ohlc_batch, extract_features, FEATURE_COUNT, FEATURE_COUNT_NO_OHLC};
 use crate::metrics::EpisodeMetrics;
 use crate::normalize::FeatureNormalizer;
 use crate::ppo::{Experience, PpoAgent, PpoConfig};
@@ -28,6 +28,9 @@ pub struct TrainerConfig {
     pub steps_per_year: f64,
     /// Minimum episode length in candles.
     pub min_episode_length: usize,
+    /// Training lifecycle parameters (FreqAI-style).
+    #[serde(default)]
+    pub training: TrainingConfig,
 }
 
 impl Default for TrainerConfig {
@@ -42,6 +45,7 @@ impl Default for TrainerConfig {
             normalize_features: true,
             steps_per_year: 35040.0,
             min_episode_length: 50,
+            training: TrainingConfig::default(),
         }
     }
 }
@@ -82,6 +86,13 @@ impl RlTrainer {
         // 1. Extract features
         let features = extract_features(candles, self.config.cvd_window);
 
+        // 1b. Optionally drop OHLC features (indices 0-3)
+        let features = if self.config.training.drop_ohlc_from_features {
+            drop_ohlc_batch(&features)
+        } else {
+            features
+        };
+
         // 2. Optionally fit normalizer and transform
         let normalizer = if self.config.normalize_features {
             Some(FeatureNormalizer::fit(&features))
@@ -94,10 +105,15 @@ impl RlTrainer {
         };
 
         // 3. Determine input dimension
-        let input_dim = if self.config.env.add_state_info {
-            FEATURE_COUNT + STATE_INFO_COUNT
+        let base_features = if self.config.training.drop_ohlc_from_features {
+            FEATURE_COUNT_NO_OHLC
         } else {
             FEATURE_COUNT
+        };
+        let input_dim = if self.config.env.add_state_info {
+            base_features + STATE_INFO_COUNT
+        } else {
+            base_features
         };
 
         // 4. Create agent with correct dimensions
@@ -106,17 +122,41 @@ impl RlTrainer {
         let mut agent = PpoAgent::new(ppo_config);
 
         // 5. Create episode sampler
-        let sampler = EpisodeSampler::new(self.config.min_episode_length, candles.len());
+        let sampler = if self.config.training.randomize_starting_position {
+            EpisodeSampler::new(self.config.min_episode_length, candles.len())
+        } else {
+            // Fixed window: always use full candle range
+            EpisodeSampler::new(candles.len(), candles.len())
+        };
 
-        // 6. Training loop
+        // 6. Determine effective epoch count
+        let effective_epochs = if self.config.training.train_cycles > 0 {
+            let data_points = features.len();
+            let total_steps = self.config.training.train_cycles * data_points;
+            let steps_per_epoch = self.config.episodes_per_epoch * self.config.min_episode_length;
+            if steps_per_epoch > 0 {
+                (total_steps / steps_per_epoch).max(1)
+            } else {
+                self.config.n_epochs
+            }
+        } else {
+            self.config.n_epochs
+        };
+
+        // 7. Training loop
         let mut epoch_metrics = Vec::new();
         let mut total_episodes = 0;
 
-        for epoch in 0..self.config.n_epochs {
+        for epoch in 0..effective_epochs {
             let windows =
                 sampler.sample_batch(candles, self.config.episodes_per_epoch, epoch as u64);
             for window in windows {
                 let window_features = extract_features(window, self.config.cvd_window);
+                let window_features = if self.config.training.drop_ohlc_from_features {
+                    drop_ohlc_batch(&window_features)
+                } else {
+                    window_features
+                };
                 let window_features = match &normalizer {
                     Some(n) => n.transform_batch(&window_features),
                     None => window_features,
@@ -128,7 +168,23 @@ impl RlTrainer {
 
             // Evaluate on full data
             let eval = self.evaluate(&agent, candles, &features);
+
+            // Early stopping on training drawdown
+            let max_dd = self.config.training.max_training_drawdown_pct;
+            let exceeded = eval.max_drawdown_pct / 100.0 > max_dd;
+
             epoch_metrics.push(eval);
+
+            if exceeded {
+                break;
+            }
+        }
+
+        // Optionally write metrics to disk
+        if self.config.training.write_metrics_to_disk {
+            if let Ok(json) = serde_json::to_string_pretty(&epoch_metrics) {
+                let _ = std::fs::write("train_metrics.json", json);
+            }
         }
 
         TrainResult {
@@ -246,6 +302,10 @@ mod tests {
             episodes_per_epoch: 2,
             min_episode_length: 10,
             normalize_features: true,
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
+            },
             ..TrainerConfig::default()
         };
         let trainer = RlTrainer::new(config);
@@ -264,6 +324,10 @@ mod tests {
             episodes_per_epoch: 1,
             min_episode_length: 10,
             normalize_features: false,
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
+            },
             ..TrainerConfig::default()
         };
         let trainer = RlTrainer::new(config);
@@ -282,6 +346,10 @@ mod tests {
                 add_state_info: true,
                 ..EnvConfig::default()
             },
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
+            },
             ..TrainerConfig::default()
         };
         let trainer = RlTrainer::new(config);
@@ -299,6 +367,107 @@ mod tests {
     }
 
     #[test]
+    fn train_with_drop_ohlc() {
+        let candles = make_candles(60);
+        let config = TrainerConfig {
+            n_epochs: 1,
+            episodes_per_epoch: 1,
+            min_episode_length: 10,
+            training: TrainingConfig {
+                train_cycles: 0,
+                drop_ohlc_from_features: true,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train(&candles);
+        assert_eq!(result.epoch_metrics.len(), 1);
+    }
+
+    #[test]
+    fn train_early_stop_on_drawdown() {
+        let candles = make_candles(60);
+        let config = TrainerConfig {
+            n_epochs: 100,
+            episodes_per_epoch: 2,
+            min_episode_length: 10,
+            training: TrainingConfig {
+                train_cycles: 0,
+                max_training_drawdown_pct: 0.0, // Any drawdown stops training
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train(&candles);
+        // Should stop early (much fewer than 100 epochs)
+        assert!(
+            result.epoch_metrics.len() < 100,
+            "expected early stop, got {} epochs",
+            result.epoch_metrics.len()
+        );
+    }
+
+    #[test]
+    fn train_with_randomize_starting_position() {
+        let candles = make_candles(60);
+        let config = TrainerConfig {
+            n_epochs: 2,
+            episodes_per_epoch: 2,
+            min_episode_length: 10,
+            training: TrainingConfig {
+                train_cycles: 0,
+                randomize_starting_position: true,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train(&candles);
+        assert_eq!(result.epoch_metrics.len(), 2);
+    }
+
+    #[test]
+    fn train_cycles_controls_epochs() {
+        let candles = make_candles(60);
+        let config = TrainerConfig {
+            n_epochs: 100, // Should be overridden by train_cycles
+            episodes_per_epoch: 1,
+            min_episode_length: 10,
+            training: TrainingConfig {
+                train_cycles: 1, // 1 * ~15 features / (1 * 10) = ~1-2 epochs
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train(&candles);
+        // train_cycles=1 with ~15 data points and 10 steps_per_epoch => ~1-2 epochs
+        assert!(
+            result.epoch_metrics.len() < 100,
+            "train_cycles should limit epochs, got {}",
+            result.epoch_metrics.len()
+        );
+    }
+
+    #[test]
+    fn trainer_config_with_training_serde_roundtrip() {
+        let config = TrainerConfig {
+            training: TrainingConfig {
+                train_cycles: 5,
+                drop_ohlc_from_features: true,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: TrainerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.training.train_cycles, 5);
+        assert!(parsed.training.drop_ohlc_from_features);
+    }
+
+    #[test]
     fn train_with_max_trade_duration() {
         let candles = make_candles(60);
         let config = TrainerConfig {
@@ -308,6 +477,10 @@ mod tests {
             env: EnvConfig {
                 max_trade_duration_candles: Some(5),
                 ..EnvConfig::default()
+            },
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
             },
             ..TrainerConfig::default()
         };
