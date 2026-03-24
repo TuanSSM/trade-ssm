@@ -638,7 +638,7 @@ mod tests {
         // Modify some weights so they're non-zero
         agent.policy_weights[1][0] = 0.42;
         agent.policy_weights[3][5] = -1.5;
-        agent.value_weights[10] = 3.14;
+        agent.value_weights[10] = 3.15;
         agent.value_bias = 0.7;
         agent.total_updates = 99;
 
@@ -650,7 +650,7 @@ mod tests {
 
         assert!((loaded.policy_weights[1][0] - 0.42).abs() < 1e-15);
         assert!((loaded.policy_weights[3][5] - (-1.5)).abs() < 1e-15);
-        assert!((loaded.value_weights[10] - 3.14).abs() < 1e-15);
+        assert!((loaded.value_weights[10] - 3.15).abs() < 1e-15);
         assert!((loaded.value_bias - 0.7).abs() < 1e-15);
         assert_eq!(loaded.total_updates, 99);
 
