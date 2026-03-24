@@ -13,6 +13,32 @@ use ssm_indicators::vwap::vwap;
 /// Number of features per row.
 pub const FEATURE_COUNT: usize = 22;
 
+/// OHLC feature indices (raw_open, raw_high, raw_low, raw_close).
+pub const OHLC_FEATURE_INDICES: [usize; 4] = [0, 1, 2, 3];
+
+/// Number of features after dropping OHLC columns.
+pub const FEATURE_COUNT_NO_OHLC: usize = FEATURE_COUNT - 4;
+
+/// Remove OHLC columns (indices 0-3) from a feature row.
+pub fn drop_ohlc(row: &FeatureRow) -> FeatureRow {
+    FeatureRow {
+        timestamp: row.timestamp,
+        features: row
+            .features
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !OHLC_FEATURE_INDICES.contains(i))
+            .map(|(_, &v)| v)
+            .collect(),
+        label: row.label,
+    }
+}
+
+/// Remove OHLC columns from a batch of feature rows.
+pub fn drop_ohlc_batch(rows: &[FeatureRow]) -> Vec<FeatureRow> {
+    rows.iter().map(drop_ohlc).collect()
+}
+
 /// Extract feature rows from candle data for ML/RL model training.
 ///
 /// Features per row (22 total):
@@ -432,6 +458,66 @@ mod tests {
     }
 
     // --- Tests from main (theirs) ---
+
+    #[test]
+    fn drop_ohlc_removes_four_features() {
+        let row = FeatureRow {
+            timestamp: 0,
+            features: vec![1.0; FEATURE_COUNT],
+            label: None,
+        };
+        let dropped = drop_ohlc(&row);
+        assert_eq!(dropped.features.len(), FEATURE_COUNT_NO_OHLC);
+    }
+
+    #[test]
+    fn drop_ohlc_preserves_indicator_values() {
+        let mut features = vec![0.0; FEATURE_COUNT];
+        features[4] = 42.0; // volume — should become index 0 after drop
+        features[5] = 0.7; // buy_sell_ratio — should become index 1
+        let row = FeatureRow {
+            timestamp: 100,
+            features,
+            label: Some(1.0),
+        };
+        let dropped = drop_ohlc(&row);
+        assert!((dropped.features[0] - 42.0).abs() < f64::EPSILON);
+        assert!((dropped.features[1] - 0.7).abs() < f64::EPSILON);
+        assert_eq!(dropped.timestamp, 100);
+        assert_eq!(dropped.label, Some(1.0));
+    }
+
+    #[test]
+    fn drop_ohlc_batch_correct_length() {
+        let rows: Vec<FeatureRow> = (0..5)
+            .map(|i| FeatureRow {
+                timestamp: i,
+                features: vec![1.0; FEATURE_COUNT],
+                label: None,
+            })
+            .collect();
+        let dropped = drop_ohlc_batch(&rows);
+        assert_eq!(dropped.len(), 5);
+        for row in &dropped {
+            assert_eq!(row.features.len(), FEATURE_COUNT_NO_OHLC);
+        }
+    }
+
+    #[test]
+    fn drop_ohlc_empty_features() {
+        let row = FeatureRow {
+            timestamp: 0,
+            features: vec![],
+            label: None,
+        };
+        let dropped = drop_ohlc(&row);
+        assert!(dropped.features.is_empty());
+    }
+
+    #[test]
+    fn feature_count_no_ohlc_correct() {
+        assert_eq!(FEATURE_COUNT_NO_OHLC, 18);
+    }
 
     #[test]
     fn anti_repainting_indicator_features_stable() {

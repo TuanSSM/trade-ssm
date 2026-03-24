@@ -88,13 +88,137 @@ impl Default for RewardConfig {
     }
 }
 
-/// Top-level RL configuration combining environment, reward, and timeframes.
+/// RL algorithm type (FreqAI `model_type` equivalent).
+///
+/// Only `PPO` is currently implemented. Other variants are configuration
+/// placeholders for future algorithm backends.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum ModelType {
+    #[default]
+    PPO,
+    A2C,
+    DQN,
+    TRPO,
+    ARS,
+    RecurrentPPO,
+    MaskablePPO,
+}
+
+/// Network policy type (FreqAI `policy_type` equivalent).
+///
+/// Only `MlpPolicy` maps to the current linear PPO implementation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PolicyType {
+    #[default]
+    MlpPolicy,
+    CnnPolicy,
+    MultiInputPolicy,
+}
+
+fn default_train_cycles() -> usize {
+    10
+}
+fn default_max_training_drawdown_pct() -> f64 {
+    0.8
+}
+fn default_cpu_count() -> usize {
+    1
+}
+fn default_net_arch() -> Vec<usize> {
+    vec![128, 128]
+}
+fn default_live_retrain_hours() -> f64 {
+    24.0
+}
+fn default_expiration_hours() -> f64 {
+    48.0
+}
+
+/// Training lifecycle configuration (FreqAI training parameters).
+///
+/// Groups parameters that control the training loop, model selection,
+/// feature engineering, and live deployment scheduling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingConfig {
+    /// Training steps = train_cycles × data_points. When 0, falls back to n_epochs.
+    #[serde(default = "default_train_cycles")]
+    pub train_cycles: usize,
+
+    /// RL algorithm to use.
+    #[serde(default)]
+    pub model_type: ModelType,
+
+    /// Network policy type.
+    #[serde(default)]
+    pub policy_type: PolicyType,
+
+    /// Early-stop training if max drawdown exceeds this fraction (0.8 = 80%).
+    #[serde(default = "default_max_training_drawdown_pct")]
+    pub max_training_drawdown_pct: f64,
+
+    /// Thread count for training (future: parallel env vectorization).
+    #[serde(default = "default_cpu_count")]
+    pub cpu_count: usize,
+
+    /// Hidden layer sizes for policy and value networks.
+    #[serde(default = "default_net_arch")]
+    pub net_arch: Vec<usize>,
+
+    /// Vary episode start points for diversity.
+    #[serde(default)]
+    pub randomize_starting_position: bool,
+
+    /// Remove OHLC features (indices 0-3) from agent input.
+    #[serde(default)]
+    pub drop_ohlc_from_features: bool,
+
+    /// Display training progress bar (for CLI, future use).
+    #[serde(default)]
+    pub progress_bar: bool,
+
+    /// Hours between live retraining cycles.
+    #[serde(default = "default_live_retrain_hours")]
+    pub live_retrain_hours: f64,
+
+    /// Hours until a trained model is considered stale.
+    #[serde(default = "default_expiration_hours")]
+    pub expiration_hours: f64,
+
+    /// Persist training metrics (loss curves, rewards) to disk.
+    #[serde(default)]
+    pub write_metrics_to_disk: bool,
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        Self {
+            train_cycles: default_train_cycles(),
+            model_type: ModelType::default(),
+            policy_type: PolicyType::default(),
+            max_training_drawdown_pct: default_max_training_drawdown_pct(),
+            cpu_count: default_cpu_count(),
+            net_arch: default_net_arch(),
+            randomize_starting_position: false,
+            drop_ohlc_from_features: false,
+            progress_bar: false,
+            live_retrain_hours: default_live_retrain_hours(),
+            expiration_hours: default_expiration_hours(),
+            write_metrics_to_disk: false,
+        }
+    }
+}
+
+/// Top-level RL configuration combining environment, reward, timeframes, and training.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RlConfig {
     pub env: EnvConfig,
     pub reward: RewardConfig,
     /// Timeframe strings to evaluate (e.g., ["3m", "15m", "1h", "4h"]).
     pub timeframes: Vec<String>,
+    /// Training lifecycle parameters (FreqAI-style).
+    #[serde(default)]
+    pub training: TrainingConfig,
 }
 
 impl Default for RlConfig {
@@ -103,6 +227,7 @@ impl Default for RlConfig {
             env: EnvConfig::default(),
             reward: RewardConfig::default(),
             timeframes: vec!["15m".to_string()],
+            training: TrainingConfig::default(),
         }
     }
 }
@@ -237,6 +362,111 @@ mod tests {
         assert_eq!(parsed.objective, "TotalReturn");
         assert_eq!(parsed.n_trials, 50);
         assert_eq!(parsed.seed, 123);
+    }
+
+    #[test]
+    fn training_config_default_values() {
+        let cfg = TrainingConfig::default();
+        assert_eq!(cfg.train_cycles, 10);
+        assert!((cfg.max_training_drawdown_pct - 0.8).abs() < f64::EPSILON);
+        assert_eq!(cfg.cpu_count, 1);
+        assert_eq!(cfg.net_arch, vec![128, 128]);
+        assert!(!cfg.randomize_starting_position);
+        assert!(!cfg.drop_ohlc_from_features);
+        assert!(!cfg.progress_bar);
+        assert!((cfg.live_retrain_hours - 24.0).abs() < f64::EPSILON);
+        assert!((cfg.expiration_hours - 48.0).abs() < f64::EPSILON);
+        assert!(!cfg.write_metrics_to_disk);
+        assert_eq!(cfg.model_type, ModelType::PPO);
+        assert_eq!(cfg.policy_type, PolicyType::MlpPolicy);
+    }
+
+    #[test]
+    fn training_config_serde_roundtrip() {
+        let cfg = TrainingConfig {
+            train_cycles: 20,
+            model_type: ModelType::DQN,
+            policy_type: PolicyType::CnnPolicy,
+            max_training_drawdown_pct: 0.5,
+            cpu_count: 4,
+            net_arch: vec![256, 256, 128],
+            randomize_starting_position: true,
+            drop_ohlc_from_features: true,
+            progress_bar: true,
+            live_retrain_hours: 12.0,
+            expiration_hours: 72.0,
+            write_metrics_to_disk: true,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: TrainingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.train_cycles, 20);
+        assert_eq!(parsed.model_type, ModelType::DQN);
+        assert_eq!(parsed.policy_type, PolicyType::CnnPolicy);
+        assert!((parsed.max_training_drawdown_pct - 0.5).abs() < f64::EPSILON);
+        assert_eq!(parsed.cpu_count, 4);
+        assert_eq!(parsed.net_arch, vec![256, 256, 128]);
+        assert!(parsed.randomize_starting_position);
+        assert!(parsed.drop_ohlc_from_features);
+        assert!(parsed.progress_bar);
+        assert!((parsed.live_retrain_hours - 12.0).abs() < f64::EPSILON);
+        assert!((parsed.expiration_hours - 72.0).abs() < f64::EPSILON);
+        assert!(parsed.write_metrics_to_disk);
+    }
+
+    #[test]
+    fn rl_config_backwards_compat_no_training_key() {
+        let json = r#"{
+            "env": {"fee_rate": 0.0, "slippage_rate": 0.0, "initial_balance": 10000.0, "position_size_pct": 1.0, "max_steps": null, "hedge_mode": false, "max_gross_exposure": 2.0},
+            "reward": {"hold_penalty_threshold": 20, "hold_penalty_rate": 0.001, "invalid_action_penalty": 0.01, "close_penalty_threshold": 50, "close_penalty_rate": 0.001, "fee_penalty": false, "win_bonus": 0.0, "drawdown_penalty_rate": 0.0, "exposure_penalty_rate": 0.0, "exposure_penalty_threshold": 1.5, "hedge_bonus": 0.0},
+            "timeframes": ["15m"]
+        }"#;
+        let parsed: RlConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.training.train_cycles, 10);
+        assert_eq!(parsed.training.model_type, ModelType::PPO);
+    }
+
+    #[test]
+    fn model_type_serde_all_variants() {
+        let variants = vec![
+            ModelType::PPO,
+            ModelType::A2C,
+            ModelType::DQN,
+            ModelType::TRPO,
+            ModelType::ARS,
+            ModelType::RecurrentPPO,
+            ModelType::MaskablePPO,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let parsed: ModelType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, v);
+        }
+    }
+
+    #[test]
+    fn policy_type_serde_all_variants() {
+        let variants = vec![
+            PolicyType::MlpPolicy,
+            PolicyType::CnnPolicy,
+            PolicyType::MultiInputPolicy,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let parsed: PolicyType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, v);
+        }
+    }
+
+    #[test]
+    fn training_config_partial_json_uses_defaults() {
+        let json = r#"{"train_cycles": 5, "drop_ohlc_from_features": true}"#;
+        let parsed: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.train_cycles, 5);
+        assert!(parsed.drop_ohlc_from_features);
+        // Rest should be defaults
+        assert_eq!(parsed.model_type, ModelType::PPO);
+        assert_eq!(parsed.cpu_count, 1);
+        assert!((parsed.max_training_drawdown_pct - 0.8).abs() < f64::EPSILON);
     }
 
     #[test]

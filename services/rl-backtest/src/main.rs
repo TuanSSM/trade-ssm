@@ -38,6 +38,7 @@ impl From<FileConfig> for RlConfig {
             env: fc.env,
             reward: fc.reward,
             timeframes: fc.timeframes,
+            training: Default::default(),
         }
     }
 }
