@@ -100,67 +100,89 @@ just docker-validate                        # validate docker-compose.yml syntax
 ### `ci.yml` — Push to main/develop + manual dispatch
 
 ```
-check (fmt + clippy) → test → build → backtest → notify
+check (fmt + clippy) → test → build → backtest + rl-backtest → notify
+                        ↘ audit (parallel)
+                        ↘ docs  (parallel)
 ```
 
-- Runs on push to `main`, `develop`
-- Manual dispatch with inputs: `symbol`, `interval`, `backtest_days`, `cvd_window`
-- Uploads binaries and backtest results as artifacts
-- Backtest reuses build artifacts (no rebuild)
-- Telegram notification on main — success + failure via `appleboy/telegram-action` (HTML format)
-- Gated by `TELEGRAM_NOTIFICATIONS_ENABLED` variable
-- Compact message: job status grid, clickable Run + Artifacts links
+- Runs on push to `main`, `develop` with concurrency control (cancels in-progress)
+- Manual dispatch with input: `cvd_window`
+- `RUSTFLAGS: -D warnings` — clippy warnings via compiler flag (consistent across jobs)
+- **Security audit**: `rustsec/audit-check` runs in parallel (known vulnerability scanning)
+- **Doc check**: `cargo doc --workspace -D warnings` catches broken doc links
+- **Binary verification**: post-build step confirms all 4 binaries exist with size reporting
+- Backtest + RL backtest reuse build artifacts (no rebuild)
+- Telegram notification on main — includes audit + docs status in grid
+- All jobs have `timeout-minutes` to prevent runaway builds
 
 ### `pr.yml` — Pull request gates
 
 ```
-check → test → build → pr-report → summary
+check → test → build → pr-report + summary
+  ↘ audit (parallel, advisory/non-blocking)
+  ↘ docs  (parallel, blocking)
 ```
 
 - Triggers on PR open/sync/reopen to `main`, `develop`
 - Concurrency: cancels in-progress runs for same PR
 - Read-only cache (`save-if: false`) to avoid polluting main branch cache
-- Uploads test output and build artifacts for debugging
-- **PR Report**: posts sticky comment with test results table and failure details
-- Summary job ensures all gates pass (required status check)
+- **Security audit**: runs as advisory (`continue-on-error: true`) — visible but non-blocking
+- **Doc check**: blocking — prevents merging PRs with broken documentation
+- **PR Report**: sticky comment includes audit + docs status in results table
+- **Summary gate**: check + test + build + docs must all pass (required status check)
+- Uploads test output and build artifacts with binary verification
 
 ### `pr-docker.yml` — Docker integration on PR
 
 ```
-changes → docker-build → docker-integration (DinD) → pr-comment → docker-status
+changes → docker-test (build + all integration) → pr-comment + docker-status
 ```
 
 - Triggers on PR open/sync/reopen to `main`, `develop`
 - **Smart filtering**: only runs when Dockerfile, docker-compose, or Rust source changes
-- **Docker Build**: builds image with Buildx, verifies binaries exist, reports image size
-- **DinD Integration**: runs Docker-in-Docker service for isolated container tests
-  - Container start test (graceful exit without credentials)
-  - Binary verification (all binaries executable and linked)
-  - Docker Compose validation
-  - Network/SSL/filesystem checks
-- **PR Comment**: posts sticky comment with build + integration results (collapsible details)
-- **Status gate**: `Docker PR Status` for branch protection
+- **Single job design**: build + integration tests in one job (eliminated DinD overhead)
+  - Buildx build with GHA cache
+  - Binary verification (all 4 binaries executable)
+  - Image size reporting with >200MB warning threshold
+  - Container start smoke test (dummy credentials, proves binary runs)
+  - Docker Compose config validation
+  - Runtime environment checks (SSL certs, working dir, root user warning)
+- **PR Comment**: sticky comment with collapsible build + test details
+- **Status gate**: `Docker PR Status` — auto-passes if no relevant changes
 
 ### `release.yml` — Tag-triggered releases
 
 ```
-validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → notify
+validate (version check + CI) → build (x86_64 + aarch64) → Docker (GHCR) → release → notify
 ```
 
 - Triggers on `v*.*.*` tags
-- Cross-compiles for linux x86_64 and aarch64
-- Docker Buildx with GitHub Actions cache backend (`cache-from/to: type=gha`)
-- Pushes Docker image to `ghcr.io` with semver tags
-- Creates GitHub Release with changelog and tarballs
+- **Version validation**: tag must match `Cargo.toml` version (prevents mismatched releases)
+- **Security audit**: runs during validation (non-blocking warning)
+- Cross-compiles for linux x86_64 and aarch64 with binary verification
+- **SHA256 checksums**: generated per platform tarball, included in release notes
+- **Categorized changelog**: commits sorted into Features/Fixes/Other sections
+- Docker Buildx pushes to `ghcr.io` with semver tags
+- Creates GitHub Release with changelog, tarballs, and checksums
+
+### Dependency management
+
+**Dependabot** (`.github/dependabot.yml`) keeps dependencies current:
+
+| Ecosystem | Schedule | Grouping |
+|-----------|----------|----------|
+| GitHub Actions | Weekly (Monday) | Individual PRs |
+| Cargo (Rust) | Weekly (Monday) | Minor/patch grouped |
+| Docker | Weekly (Monday) | Individual PRs |
 
 ### CI cache & artifact strategy
 
 | Workflow | Cache key | Save policy | Artifacts |
 |----------|-----------|-------------|-----------|
-| `ci.yml` | `ci-check`, `ci-test`, `ci-release` | Always (default branch) | Binaries (14d), backtest results (30d) |
-| `pr.yml` | `pr-check`, `pr-test`, `pr-build` | Never (`save-if: false`) | Test output (7d), build (3d) |
-| `pr-docker.yml` | `pr-docker` (GHA Buildx) | Min (GHA cache) | Build report (7d), integration results (7d) |
-| `release.yml` | `release-validate`, `release-{target}` | Always | Platform tarballs (5d), Docker layers (GHA) |
+| `ci.yml` | `ci-check`, `ci-test`, `ci-release`, `ci-docs` | Always (default branch) | Binaries (14d), backtest results (30d) |
+| `pr.yml` | `pr-check`, `pr-test`, `pr-build`, `pr-docs` | Never (`save-if: false`) | Test output (7d), build (3d) |
+| `pr-docker.yml` | `pr-docker` (GHA Buildx) | Min (GHA cache) | Docker report (7d) |
+| `release.yml` | `release-validate`, `release-{target}` | Always | Platform tarballs + checksums (5d) |
 
 - **Rust cache**: `Swatinem/rust-cache@v2` with `shared-key` per job for isolation
 - **Docker cache**: GitHub Actions cache backend via `docker/build-push-action` `cache-from`/`cache-to`
@@ -168,13 +190,13 @@ validate → build (x86_64 + aarch64) → Docker (GHCR) → GitHub Release → n
 
 ### Telegram notifications
 
-All workflows use [`appleboy/telegram-action`](https://github.com/appleboy/telegram-action) with HTML format:
+All workflows use `appleboy/telegram-action@v1.0.0` (pinned version) with HTML format:
 
 | Workflow | Trigger | Content |
 |----------|---------|---------|
-| `ci.yml` | main push (success + failure) | Job status grid, commit SHA, Run + Artifacts links |
+| `ci.yml` | main push (success + failure) | Job status grid (7 jobs), commit SHA, Run + Artifacts links |
 | `pr.yml` | PR failure only | PR link, job statuses, Run + Artifacts links |
-| `pr-docker.yml` | Docker failure only | PR link, build/integration status, Run + Artifacts links |
+| `pr-docker.yml` | Docker failure only | PR link, build/test status, Run + Artifacts links |
 | `release.yml` | Release success | Version, `docker pull` command, Release Notes + Build links |
 
 - **Format**: HTML (`<b>`, `<code>`, `<a href>`) — more reliable than Telegram Markdown v1

@@ -24,13 +24,13 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      docker: ${{ steps.filter.outputs.docker }}
-      rust: ${{ steps.filter.outputs.rust }}
+      should_run: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.rust == 'true' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
@@ -45,20 +45,20 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
 
-  # ── Docker build test ──
-  docker-build:
-    name: Docker Build
+  # ── Docker build + integration tests (single job, no DinD overhead) ──
+  docker-test:
+    name: Docker Build & Test
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.should_run == 'true'
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        id: docker-build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -69,201 +69,167 @@ jobs:
           cache-to: type=gha,mode=min,scope=pr-docker
 
       - name: Verify binaries in image
-        id: verify
+        id: verify-binaries
         run: |
-          {
-            echo "## Docker Image Verification"
-            echo ""
-            echo "**Image:** \`trade-ssm:pr-${{ github.event.pull_request.number }}\`"
-            echo ""
-
-            echo "### Binaries"
-            echo '```'
-            for bin in analyzer download-data backtest rl-backtest; do
-              if docker run --rm trade-ssm:pr-${{ github.event.pull_request.number }} \
-                  sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin'" 2>/dev/null; then
-                echo "  ✓ $bin found"
-              else
-                echo "  ✗ $bin MISSING"
-                MISSING=1
-              fi
-            done
-            echo '```'
-
-            echo ""
-            echo "### Image Size"
-            echo '```'
-            docker images trade-ssm:pr-${{ github.event.pull_request.number }} --format "{{.Size}}"
-            echo '```'
-          } | tee docker-build-report.txt
-
-          if [ "${MISSING:-0}" = "1" ]; then
-            echo "::error::Missing binaries in Docker image"
-            exit 1
-          fi
-
-      - name: Upload build report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-build-report-${{ github.event.pull_request.number }}
-          path: docker-build-report.txt
-          retention-days: 7
-
-  # ── Docker-in-Docker integration tests ──
-  docker-integration:
-    name: DinD Integration Tests
-    runs-on: ubuntu-latest
-    needs: docker-build
-    services:
-      dind:
-        image: docker:27-dind
-        options: --privileged
-        ports:
-          - 2375:2375
-        env:
-          DOCKER_TLS_CERTDIR: ""
-    env:
-      DOCKER_HOST: tcp://localhost:2375
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Wait for DinD
-        run: |
-          for i in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "DinD ready after ${i}s"
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "::error::DinD failed to start after 30s"
-              exit 1
-            fi
-            sleep 1
-          done
-
-      - name: Build image in DinD
-        run: docker build -t trade-ssm:integration .
-
-      - name: Test — Container starts cleanly
-        id: test-start
-        run: |
-          {
-            echo "### Container Start Test"
-            echo ""
-            echo '```'
-            # analyzer requires Telegram env vars — pass dummy values for smoke test
-            # It will fail on network (no real Telegram API) but proves the binary starts
-            timeout 10 docker run --rm \
-              -e RUST_LOG=error \
-              -e TELEGRAM_BOT_TOKEN=ci-test-dummy \
-              -e TELEGRAM_CHAT_ID=0 \
-              trade-ssm:integration analyzer 2>&1 | head -20 || true
-            echo '```'
-            echo "Container executed (expected graceful exit without live credentials)"
-            echo ""
-          } > integration-results.txt
-
-      - name: Test — Binary verification
-        id: test-binaries
-        run: |
-          {
-            echo "### Binary Verification"
-            echo ""
-            echo '```'
-          } >> integration-results.txt
-
+          IMAGE="trade-ssm:pr-${{ github.event.pull_request.number }}"
           FAILED=0
+
+          {
+            echo "## Docker Build Report"
+            echo ""
+            echo "**Image:** \`$IMAGE\`"
+            echo ""
+            echo "### Binary Verification"
+            echo '```'
+          } > report.txt
+
           for bin in analyzer download-data backtest rl-backtest; do
-            if docker run --rm trade-ssm:integration sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin: executable'"; then
-              docker run --rm trade-ssm:integration sh -c "test -x /usr/local/bin/$bin && echo '✓ $bin: executable'" >> integration-results.txt
+            if docker run --rm "$IMAGE" test -x "/usr/local/bin/$bin"; then
+              echo "  ✓ $bin" >> report.txt
             else
-              echo "✗ $bin: missing or not executable" >> integration-results.txt
+              echo "  ✗ $bin MISSING" >> report.txt
               FAILED=1
             fi
           done
 
-          echo '```' >> integration-results.txt
-          echo "" >> integration-results.txt
+          echo '```' >> report.txt
+          echo "" >> report.txt
 
           if [ "$FAILED" = "1" ]; then
-            echo "::error::One or more binaries missing from Docker image"
+            echo "::error::Missing binaries in Docker image"
             exit 1
           fi
+
+      - name: Report image size
+        id: image-size
+        run: |
+          IMAGE="trade-ssm:pr-${{ github.event.pull_request.number }}"
+          SIZE=$(docker images "$IMAGE" --format "{{.Size}}")
+          SIZE_BYTES=$(docker inspect "$IMAGE" --format '{{.Size}}')
+
+          {
+            echo "### Image Size"
+            echo '```'
+            echo "$SIZE"
+            echo '```'
+            echo ""
+          } >> report.txt
+
+          # Warn if image exceeds 200MB
+          if [ "$SIZE_BYTES" -gt 209715200 ] 2>/dev/null; then
+            echo "::warning::Docker image size ($SIZE) exceeds 200MB threshold"
+            echo "> ⚠️ Image size ($SIZE) exceeds 200MB recommended threshold" >> report.txt
+            echo "" >> report.txt
+          fi
+
+      - name: Test — Container starts cleanly
+        id: test-start
+        run: |
+          IMAGE="trade-ssm:pr-${{ github.event.pull_request.number }}"
+
+          {
+            echo "### Container Start Test"
+            echo '```'
+          } >> report.txt
+
+          # analyzer requires Telegram env vars — pass dummy values for smoke test
+          # It will fail on network (no real Telegram API) but proves the binary starts
+          timeout 10 docker run --rm \
+            -e RUST_LOG=error \
+            -e TELEGRAM_BOT_TOKEN=ci-test-dummy \
+            -e TELEGRAM_CHAT_ID=0 \
+            "$IMAGE" analyzer 2>&1 | head -20 >> report.txt || true
+
+          {
+            echo '```'
+            echo "Container executed (expected graceful exit without live credentials)"
+            echo ""
+          } >> report.txt
 
       - name: Test — Docker Compose validation
         id: test-compose
         run: |
           {
             echo "### Docker Compose Validation"
-            echo ""
             echo '```'
-          } >> integration-results.txt
+          } >> report.txt
 
-          # docker compose runs on the runner (host), not in DinD
-          DOCKER_HOST="" docker compose config --quiet 2>&1 && \
-            echo "✓ docker-compose.yml: valid" >> integration-results.txt || \
-            echo "✗ docker-compose.yml: invalid" >> integration-results.txt
+          if docker compose config --quiet 2>&1; then
+            echo "✓ docker-compose.yml: valid" >> report.txt
+          else
+            echo "✗ docker-compose.yml: invalid" >> report.txt
+          fi
 
-          echo '```' >> integration-results.txt
-          echo "" >> integration-results.txt
+          echo '```' >> report.txt
+          echo "" >> report.txt
 
-      - name: Test — Container runtime checks
+      - name: Test — Runtime environment
         id: test-runtime
         run: |
+          IMAGE="trade-ssm:pr-${{ github.event.pull_request.number }}"
+
           {
             echo "### Runtime Environment"
-            echo ""
             echo '```'
-          } >> integration-results.txt
+          } >> report.txt
 
           # SSL certificates
-          docker run --rm trade-ssm:integration \
+          docker run --rm "$IMAGE" \
             sh -c "test -d /etc/ssl/certs && echo '✓ SSL certificates present' || echo '✗ SSL certificates missing'" \
-            >> integration-results.txt 2>&1
+            >> report.txt 2>&1
 
           # Working directory
-          docker run --rm trade-ssm:integration \
+          docker run --rm "$IMAGE" \
             sh -c "test -d /app/user_data && echo '✓ /app/user_data directory exists' || echo '✗ /app/user_data missing'" \
-            >> integration-results.txt 2>&1
+            >> report.txt 2>&1
 
-          # DNS resolution (best-effort, may not work in all CI environments)
-          docker run --rm trade-ssm:integration \
-            sh -c "getent hosts api.binance.com >/dev/null 2>&1 && echo '✓ DNS resolution works' || echo '⚠ DNS not available (expected in some CI)'" \
-            >> integration-results.txt 2>&1
+          # Non-root user check (best practice)
+          docker run --rm "$IMAGE" \
+            sh -c "id -u" > /tmp/uid 2>&1
+          UID_VAL=$(cat /tmp/uid)
+          if [ "$UID_VAL" = "0" ]; then
+            echo "⚠ Running as root (consider non-root user)" >> report.txt
+          else
+            echo "✓ Running as non-root (UID: $UID_VAL)" >> report.txt
+          fi
 
-          echo '```' >> integration-results.txt
+          echo '```' >> report.txt
 
-      - name: Upload integration results
+      - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-results-${{ github.event.pull_request.number }}
-          path: integration-results.txt
+          name: docker-report-${{ github.event.pull_request.number }}
+          path: report.txt
           retention-days: 7
+
+      - name: Set outputs
+        if: always()
+        id: results
+        run: |
+          cat report.txt
+          echo "report_exists=true" >> "$GITHUB_OUTPUT"
 
   # ── Post PR comment with results ──
   pr-comment:
     name: PR Report
     runs-on: ubuntu-latest
-    needs: [docker-build, docker-integration]
-    if: always()
+    needs: [changes, docker-test]
+    if: always() && needs.changes.outputs.should_run == 'true'
+    timeout-minutes: 5
     permissions:
       pull-requests: write
     steps:
-      - name: Download artifacts
+      - name: Download report
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-${{ github.event.pull_request.number }}"
-          merge-multiple: true
+          name: docker-report-${{ github.event.pull_request.number }}
+        continue-on-error: true
 
       - name: Build PR comment
-        id: comment
         run: |
-          BUILD_STATUS="${{ needs.docker-build.result }}"
-          INTEGRATION_STATUS="${{ needs.docker-integration.result }}"
+          TEST_STATUS="${{ needs.docker-test.result }}"
 
-          # Status emoji mapping
           status_icon() {
             case "$1" in
               success)  echo "✅" ;;
@@ -274,29 +240,18 @@ jobs:
           }
 
           {
-            echo "## 🐳 Docker Integration Report"
+            echo "## Docker Integration Report"
             echo ""
             echo "| Stage | Status |"
             echo "|-------|--------|"
-            echo "| Docker Build | $(status_icon $BUILD_STATUS) \`$BUILD_STATUS\` |"
-            echo "| DinD Integration | $(status_icon $INTEGRATION_STATUS) \`$INTEGRATION_STATUS\` |"
+            echo "| Docker Build & Test | $(status_icon $TEST_STATUS) \`$TEST_STATUS\` |"
             echo ""
 
-            if [ -f docker-build-report.txt ]; then
+            if [ -f report.txt ]; then
               echo "<details>"
-              echo "<summary>Docker Build Details</summary>"
+              echo "<summary>Build & Integration Details</summary>"
               echo ""
-              cat docker-build-report.txt
-              echo ""
-              echo "</details>"
-              echo ""
-            fi
-
-            if [ -f integration-results.txt ]; then
-              echo "<details>"
-              echo "<summary>Integration Test Results</summary>"
-              echo ""
-              cat integration-results.txt
+              cat report.txt
               echo ""
               echo "</details>"
               echo ""
@@ -314,26 +269,27 @@ jobs:
           header: docker-integration
           path: pr-comment.md
 
-  # ── Telegram notification for Docker PR results ──
+  # ── Telegram notification for Docker PR failures ──
   notify:
     name: Notify
     runs-on: ubuntu-latest
-    needs: [docker-build, docker-integration]
-    if: always() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true' && (needs.docker-build.result == 'failure' || needs.docker-integration.result == 'failure')
+    needs: [docker-test]
+    if: always() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true' && needs.docker-test.result == 'failure'
+    timeout-minutes: 5
     steps:
       - name: Telegram notification
         if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
-        uses: appleboy/telegram-action@master
+        uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: html
           disable_web_page_preview: true
           message: |
-            🐳❌ <b>Docker PR #${{ github.event.pull_request.number }}</b> failed
+            ❌ <b>Docker PR #${{ github.event.pull_request.number }}</b> failed
             <a href="${{ github.event.pull_request.html_url }}">${{ github.event.pull_request.title }}</a>
 
-            Build ${{ needs.docker-build.result == 'success' && '✅' || '❌' }} Integration ${{ needs.docker-integration.result == 'success' && '✅' || '❌' }}
+            Build & Test ${{ needs.docker-test.result == 'success' && '✅' || '❌' }}
 
             <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View Run</a> · <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts">Artifacts</a>
 
@@ -341,33 +297,26 @@ jobs:
   docker-status:
     name: Docker PR Status
     runs-on: ubuntu-latest
-    needs: [changes, docker-build, docker-integration]
+    needs: [changes, docker-test]
     if: always()
+    timeout-minutes: 5
     steps:
       - name: Evaluate results
         run: |
-          CHANGES_DOCKER="${{ needs.changes.outputs.docker }}"
-          CHANGES_RUST="${{ needs.changes.outputs.rust }}"
-          BUILD="${{ needs.docker-build.result }}"
-          INTEGRATION="${{ needs.docker-integration.result }}"
+          SHOULD_RUN="${{ needs.changes.outputs.should_run }}"
+          TEST="${{ needs.docker-test.result }}"
 
-          echo "Change detection — docker: $CHANGES_DOCKER, rust: $CHANGES_RUST"
-          echo "Docker build: $BUILD"
-          echo "Integration tests: $INTEGRATION"
+          echo "Should run: $SHOULD_RUN"
+          echo "Docker test: $TEST"
 
           # If no relevant changes, skip is acceptable
-          if [ "$CHANGES_DOCKER" != "true" ] && [ "$CHANGES_RUST" != "true" ]; then
+          if [ "$SHOULD_RUN" != "true" ]; then
             echo "No Docker/Rust changes detected — skipping"
             exit 0
           fi
 
-          if [ "$BUILD" != "success" ]; then
-            echo "::error::Docker build failed"
-            exit 1
-          fi
-
-          if [ "$INTEGRATION" != "success" ]; then
-            echo "::error::Docker integration tests failed"
+          if [ "$TEST" != "success" ]; then
+            echo "::error::Docker build or integration tests failed"
             exit 1
           fi
 

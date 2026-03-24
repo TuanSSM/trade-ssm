@@ -18,8 +18,9 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -30,16 +31,33 @@ jobs:
           shared-key: release-validate
           save-if: ${{ github.ref_type == 'tag' }}
 
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($TAG) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "✓ Tag v$TAG matches Cargo.toml version $CARGO_VERSION"
+
       - name: Full CI check
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace --no-fail-fast
 
+      - name: Security audit
+        continue-on-error: true
+        run: |
+          cargo install cargo-audit --quiet 2>/dev/null || true
+          cargo audit 2>/dev/null || echo "::warning::Security audit found issues (non-blocking for release)"
+
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     needs: validate
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -48,7 +66,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,22 +91,37 @@ jobs:
       - name: Package binaries
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/{analyzer,download-data,backtest,rl-backtest} dist/ 2>/dev/null || true
+          for bin in analyzer download-data backtest rl-backtest; do
+            if [ -f "target/${{ matrix.target }}/release/$bin" ]; then
+              cp "target/${{ matrix.target }}/release/$bin" dist/
+              echo "✓ $bin ($(stat -c%s dist/$bin | numfmt --to=iec))"
+            else
+              echo "::error::Binary $bin not found for ${{ matrix.target }}"
+              exit 1
+            fi
+          done
           tar czf trade-ssm-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C dist .
+
+      - name: Generate checksums
+        run: |
+          sha256sum trade-ssm-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > trade-ssm-${{ github.ref_name }}-${{ matrix.target }}.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: trade-ssm-${{ matrix.target }}
-          path: trade-ssm-*.tar.gz
+          path: |
+            trade-ssm-*.tar.gz
+            trade-ssm-*.sha256
           retention-days: 5
 
   docker:
     name: Docker Image
     runs-on: ubuntu-latest
     needs: validate
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -124,8 +157,9 @@ jobs:
     name: GitHub Release
     runs-on: ubuntu-latest
     needs: [build, docker]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -135,24 +169,62 @@ jobs:
           path: artifacts
           pattern: trade-ssm-*
 
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} release-assets/ \;
+          echo "Release assets:"
+          ls -la release-assets/
+
       - name: Generate changelog
         id: changelog
         run: |
           PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
-          if [ -z "$PREV_TAG" ]; then
-            CHANGELOG=$(git log --oneline --no-merges)
-          else
-            CHANGELOG=$(git log --oneline --no-merges "${PREV_TAG}..HEAD")
-          fi
+
           {
             echo 'body<<EOF'
             echo "## What's Changed"
             echo ""
-            echo "$CHANGELOG" | sed 's/^/- /'
+
+            if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${{ github.ref_name }}" ]; then
+              git log --oneline --no-merges | sed 's/^/- /'
+            else
+              # Categorize commits
+              FEAT=$(git log --oneline --no-merges "${PREV_TAG}..HEAD" --grep="^feat" || true)
+              FIX=$(git log --oneline --no-merges "${PREV_TAG}..HEAD" --grep="^fix" || true)
+              OTHER=$(git log --oneline --no-merges "${PREV_TAG}..HEAD" --invert-grep --grep="^feat" --grep="^fix" || true)
+
+              if [ -n "$FEAT" ]; then
+                echo "### Features"
+                echo "$FEAT" | sed 's/^/- /'
+                echo ""
+              fi
+              if [ -n "$FIX" ]; then
+                echo "### Fixes"
+                echo "$FIX" | sed 's/^/- /'
+                echo ""
+              fi
+              if [ -n "$OTHER" ]; then
+                echo "### Other"
+                echo "$OTHER" | sed 's/^/- /'
+                echo ""
+              fi
+
+              # Fallback if categorization produced nothing
+              if [ -z "$FEAT" ] && [ -z "$FIX" ] && [ -z "$OTHER" ]; then
+                git log --oneline --no-merges "${PREV_TAG}..HEAD" | sed 's/^/- /'
+              fi
+            fi
+
             echo ""
             echo "## Docker"
             echo '```bash'
             echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
+            echo '```'
+            echo ""
+            echo "## Checksums"
+            echo '```'
+            cat release-assets/*.sha256 2>/dev/null || echo "No checksums available"
             echo '```'
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
@@ -161,7 +233,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.changelog.outputs.body }}
-          files: artifacts/**/*.tar.gz
+          files: release-assets/*
           generate_release_notes: false
 
   notify:
@@ -169,10 +241,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: release
     if: success() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true'
+    timeout-minutes: 5
     steps:
       - name: Telegram notification
         if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
-        uses: appleboy/telegram-action@master
+        uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
