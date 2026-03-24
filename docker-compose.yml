@@ -7,7 +7,9 @@ services:
     container_name: trade-ssm-analyzer
     command: ["analyzer"]
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - SYMBOL=${SYMBOL:-BTCUSDT}

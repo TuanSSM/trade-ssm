@@ -171,6 +171,7 @@ jobs:
     if: success() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true'
     steps:
       - name: Telegram notification
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}

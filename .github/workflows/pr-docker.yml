@@ -152,11 +152,15 @@ jobs:
             echo "### Container Start Test"
             echo ""
             echo '```'
-            # analyzer requires env vars — verify it exits gracefully without them
-            docker run --rm -e RUST_LOG=error \
+            # analyzer requires Telegram env vars — pass dummy values for smoke test
+            # It will fail on network (no real Telegram API) but proves the binary starts
+            timeout 10 docker run --rm \
+              -e RUST_LOG=error \
+              -e TELEGRAM_BOT_TOKEN=ci-test-dummy \
+              -e TELEGRAM_CHAT_ID=0 \
               trade-ssm:integration analyzer 2>&1 | head -20 || true
             echo '```'
-            echo "Container executed (expected graceful exit without credentials)"
+            echo "Container executed (expected graceful exit without live credentials)"
             echo ""
           } > integration-results.txt
 
@@ -318,6 +322,7 @@ jobs:
     if: always() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true' && (needs.docker-build.result == 'failure' || needs.docker-integration.result == 'failure')
     steps:
       - name: Telegram notification
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
