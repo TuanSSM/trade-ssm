@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn consumer_topics_returns_correct_topics() {
         // Test topic generation for multiple producers.
-        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let symbols = ["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         let topics: Vec<String> = symbols.iter().map(|s| producer_topic(s)).collect();
         assert_eq!(topics.len(), 2);
         assert_eq!(topics[0], "ssm.producer.btcusdt");
