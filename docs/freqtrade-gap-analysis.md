@@ -331,6 +331,43 @@ Freqtrade supports per-pair leverage via callback, liquidation buffer, isolated/
 
 ---
 
+### TODO-018: Protection Plugins
+
+**Gap:** No automated circuit-breaker plugins beyond basic position limits. Freqtrade has:
+StoplossGuard (halt after N stoplosses), MaxDrawdown (halt when drawdown exceeded),
+CooldownPeriod (lock pair after exit), LowProfitPairs (lock underperformers).
+
+**Definition of Done:**
+- [ ] `Protection` trait with `should_lock(&self, trades: &[Trade], pair: &str) -> Option<Duration>`
+- [ ] `StoplossGuard`: halt trading after N stoplosses within configurable time window
+- [ ] `MaxDrawdown`: pause trading when portfolio drawdown exceeds threshold
+- [ ] `CooldownPeriod`: lock pair for N candles after exit to prevent re-entry churn
+- [ ] `LowProfitPairs`: lock pairs with negative performance over lookback window
+- [ ] Protection stack: multiple protections composable in sequence
+- [ ] Pair lock state tracked in execution engine
+- [ ] Locks surfaced in Telegram notifications
+- [ ] Unit tests for each protection type
+- [ ] `just ci` passes
+
+---
+
+### TODO-019: Pairlist Plugins & Filters
+
+**Gap:** No dynamic pair selection. Freqtrade has VolumePairList, PercentChangePairList,
+MarketCapPairList, plus filters (AgeFilter, SpreadFilter, VolatilityFilter, PriceFilter, etc.).
+
+**Definition of Done:**
+- [ ] `PairListProvider` trait: `fn pairs(&self) -> Result<Vec<String>>`
+- [ ] `StaticPairList`: config-defined list with regex wildcard support
+- [ ] `VolumePairList`: sort/filter by 24h volume from exchange API
+- [ ] `PairFilter` trait: `fn filter(&self, pairs: &[String]) -> Vec<String>`
+- [ ] At least 3 filters: `PriceFilter`, `SpreadFilter`, `VolatilityFilter`
+- [ ] Filter chain: composable pipeline of filters applied sequentially
+- [ ] Refresh interval for dynamic pair lists in live mode
+- [ ] `just ci` passes
+
+---
+
 ## Summary Matrix
 
 | ID | Feature | Priority | Effort | Status |
@@ -352,6 +389,8 @@ Freqtrade supports per-pair leverage via callback, liquidation buffer, isolated/
 | TODO-015 | Edge Positioning | P3 | Medium | Not started |
 | TODO-016 | Leverage & Margin Modes | P3 | Medium | Partial |
 | TODO-017 | Advanced RL Agents | P3 | Large | Not started |
+| TODO-018 | Protection Plugins | P1 | Medium | Partial (circuit breaker exists) |
+| TODO-019 | Pairlist Plugins & Filters | P2 | Medium | Not started |
 
 ---
 
