@@ -8,6 +8,7 @@ edition.workspace = true
 ssm-core = { workspace = true }
 ssm-indicators = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
 chrono = { workspace = true }

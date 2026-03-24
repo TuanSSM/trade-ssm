@@ -257,6 +257,103 @@ pub enum ExecutionMode {
     Live,  // real exchange API
 }
 
+// ---------------------------------------------------------------------------
+// Trade lifecycle types (TODO-002, TODO-003, TODO-005)
+// ---------------------------------------------------------------------------
+
+/// Reason a position was exited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExitReason {
+    Signal,
+    Stoploss,
+    TrailingStop,
+    Roi,
+    CustomExit(String),
+    ForceExit,
+    Liquidation,
+}
+
+impl std::fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signal => f.write_str("signal"),
+            Self::Stoploss => f.write_str("stoploss"),
+            Self::TrailingStop => f.write_str("trailing_stop"),
+            Self::Roi => f.write_str("roi"),
+            Self::CustomExit(s) => write!(f, "custom_exit:{s}"),
+            Self::ForceExit => f.write_str("force_exit"),
+            Self::Liquidation => f.write_str("liquidation"),
+        }
+    }
+}
+
+/// Dynamic stoploss configuration for a trade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StoplossType {
+    /// Fixed percentage below entry.
+    Fixed(Decimal),
+    /// ATR-based trailing stop: multiplier * ATR.
+    AtrTrailing {
+        multiplier: Decimal,
+        atr_period: usize,
+    },
+    /// Time-based: tighten stoploss after N candles.
+    TimeBased {
+        initial_pct: Decimal,
+        breakeven_after: usize,
+    },
+    /// Stepped: discrete levels at profit thresholds.
+    Stepped(Vec<StoplossStep>),
+}
+
+/// A profit threshold → stoploss level mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoplossStep {
+    pub profit_pct: Decimal,
+    pub stoploss_pct: Decimal,
+}
+
+/// ROI table entry: at `minutes` into trade, take profit at `roi_pct`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoiEntry {
+    pub minutes: u64,
+    pub roi_pct: Decimal,
+}
+
+/// Completed trade record for backtesting/analytics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeRecord {
+    pub id: String,
+    pub symbol: String,
+    pub side: Side,
+    pub entry_price: Decimal,
+    pub exit_price: Decimal,
+    pub quantity: Decimal,
+    pub profit: Decimal,
+    pub profit_pct: Decimal,
+    pub entry_time: i64,
+    pub exit_time: i64,
+    pub duration_candles: u64,
+    pub exit_reason: ExitReason,
+    pub leverage: u32,
+    pub fee: Decimal,
+}
+
+/// Margin mode for futures trading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MarginMode {
+    Isolated,
+    Cross,
+}
+
+/// Pair lock: prevents trading a symbol for a duration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairLock {
+    pub symbol: String,
+    pub reason: String,
+    pub until: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

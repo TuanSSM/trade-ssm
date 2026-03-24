@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use rust_decimal::Decimal;
 use ssm_core::{Candle, ForceOrderResponse, Liquidation};
 use std::str::FromStr;
+
+use crate::exchange_trait::{Exchange, PairInfo};
 
 const FUTURES_BASE: &str = "https://fapi.binance.com";
 
@@ -115,6 +118,45 @@ impl BinanceClient {
 impl Default for BinanceClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait]
+impl Exchange for BinanceClient {
+    fn name(&self) -> &str {
+        "binance"
+    }
+
+    async fn fetch_klines(&self, symbol: &str, interval: &str, limit: u32) -> Result<Vec<Candle>> {
+        self.fetch_futures_klines(symbol, interval, limit).await
+    }
+
+    async fn fetch_klines_range(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: u32,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<Vec<Candle>> {
+        self.fetch_futures_klines_range(symbol, interval, limit, start_time, end_time)
+            .await
+    }
+
+    async fn fetch_liquidations(&self, symbol: &str, limit: u32) -> Result<Vec<Liquidation>> {
+        self.fetch_liquidations(symbol, limit).await
+    }
+
+    async fn list_pairs(&self) -> Result<Vec<PairInfo>> {
+        // Stub: would call /fapi/v1/exchangeInfo
+        anyhow::bail!("list_pairs not yet implemented for Binance")
+    }
+
+    fn supported_timeframes(&self) -> Vec<&str> {
+        vec![
+            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w",
+            "1M",
+        ]
     }
 }
 

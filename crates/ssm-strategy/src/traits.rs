@@ -1,11 +1,14 @@
 use anyhow::Result;
-use ssm_core::{Candle, Signal};
+use rust_decimal::Decimal;
+use ssm_core::{Candle, ExitReason, Order, Position, RoiEntry, Signal, StoplossType};
 
 /// Core strategy trait — implemented by both bot strategies and AI-driven strategies.
 ///
 /// Inspired by freqtrade's `IStrategy` interface:
 /// - `populate_indicators` → `analyze`
 /// - `populate_entry_trend` + `populate_exit_trend` → signal output
+///
+/// All callback methods have default no-op implementations for backward compatibility.
 pub trait Strategy: Send + Sync {
     /// Human-readable strategy name.
     fn name(&self) -> &str;
@@ -13,6 +16,63 @@ pub trait Strategy: Send + Sync {
     /// Analyze closed candles and produce a signal (if any).
     /// Anti-repainting: callers must pass only closed candles.
     fn analyze(&self, candles: &[Candle]) -> Result<Option<Signal>>;
+
+    // -----------------------------------------------------------------------
+    // Trade lifecycle callbacks (TODO-003)
+    // -----------------------------------------------------------------------
+
+    /// Confirm trade entry. Return false to veto the signal.
+    fn on_trade_enter(&self, _signal: &Signal, _position: Option<&Position>) -> bool {
+        true
+    }
+
+    /// Custom exit logic. Return Some(reason) to exit the position.
+    fn on_trade_exit(&self, _position: &Position, _candles: &[Candle]) -> Option<ExitReason> {
+        None
+    }
+
+    /// React to an order being filled.
+    fn on_order_filled(&self, _order: &Order, _position: &Position) {}
+
+    /// Custom position sizing. Return desired quantity given a signal and balance.
+    fn custom_position_size(&self, _signal: &Signal, _balance: Decimal) -> Option<Decimal> {
+        None
+    }
+
+    /// DCA: return Some(additional_quantity) to adjust position.
+    fn should_adjust_position(&self, _position: &Position, _candles: &[Candle]) -> Option<Decimal> {
+        None
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic stoploss & take-profit (TODO-002)
+    // -----------------------------------------------------------------------
+
+    /// Return dynamic stoploss for the current trade.
+    /// `candles_in_trade` = number of closed candles since entry.
+    fn custom_stoploss(
+        &self,
+        _position: &Position,
+        _candles: &[Candle],
+        _candles_in_trade: usize,
+    ) -> Option<Decimal> {
+        None
+    }
+
+    /// Return the stoploss type configuration for this strategy.
+    fn stoploss_type(&self) -> Option<StoplossType> {
+        None
+    }
+
+    /// ROI table: profit targets at time intervals.
+    fn roi_table(&self) -> Vec<RoiEntry> {
+        vec![]
+    }
+
+    /// Custom leverage per pair/signal. Default = 1.
+    fn leverage(&self, _pair: &str, _signal: &Signal) -> Decimal {
+        Decimal::ONE
+    }
 }
 
 /// Strategy that can be trained on historical data (AI strategies).

@@ -1,3 +1,4 @@
+pub mod producer_consumer;
 pub mod publisher;
 pub mod subscriber;
 pub mod topics;

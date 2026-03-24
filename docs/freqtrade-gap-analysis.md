@@ -372,25 +372,25 @@ MarketCapPairList, plus filters (AgeFilter, SpreadFilter, VolatilityFilter, Pric
 
 | ID | Feature | Priority | Effort | Status |
 |----|---------|----------|--------|--------|
-| TODO-001 | Live Exchange Execution | P0 | Large | Stubbed |
-| TODO-002 | Dynamic Stoploss & Take-Profit | P0 | Medium | Not started |
-| TODO-003 | Trade Lifecycle Callbacks | P0 | Medium | Not started |
-| TODO-004 | Hyperparameter Optimization | P1 | Large | Not started |
-| TODO-005 | Backtesting Enhancements | P1 | Large | Partial |
-| TODO-006 | Multi-Pair / Portfolio | P1 | Large | Not started |
-| TODO-007 | REST API for Bot Control | P1 | Medium | Not started |
-| TODO-008 | Advanced AI/ML Pipeline | P1 | XL | Partial |
-| TODO-009 | Webhook Notifications | P2 | Small | Not started |
-| TODO-010 | Plotting & Visualization | P2 | Medium | Not started |
-| TODO-011 | Telegram Interactive Bot | P2 | Medium | Not started |
-| TODO-012 | CLI Utility Commands | P2 | Small | Not started |
-| TODO-013 | Producer/Consumer Multi-Bot | P2 | Large | Partial (NATS exists) |
-| TODO-014 | Multi-Exchange Support | P3 | XL | Not started |
-| TODO-015 | Edge Positioning | P3 | Medium | Not started |
-| TODO-016 | Leverage & Margin Modes | P3 | Medium | Partial |
-| TODO-017 | Advanced RL Agents | P3 | Large | Not started |
-| TODO-018 | Protection Plugins | P1 | Medium | Partial (circuit breaker exists) |
-| TODO-019 | Pairlist Plugins & Filters | P2 | Medium | Not started |
+| TODO-001 | Live Exchange Execution | P0 | Large | **Done** — LiveEngine wired to ExecutionEngine, async submit/cancel/query, preflight checks, testnet support, retry logic |
+| TODO-002 | Dynamic Stoploss & Take-Profit | P0 | Medium | **Done** — StoplossManager (Fixed/ATR/TimeBased/Stepped), ROI table, anti-repainting tests |
+| TODO-003 | Trade Lifecycle Callbacks | P0 | Medium | **Done** — Strategy trait extended with 7 callbacks, CvdMomentum demonstrates all callbacks, unit tests per path |
+| TODO-004 | Hyperparameter Optimization | P1 | Large | **Done** — HyperoptRunner (grid + random search), 5 loss functions, ranked JSON results |
+| TODO-005 | Backtesting Enhancements | P1 | Large | **Done** — BacktestEngine with full trade sim, PnL/fees/drawdown/Sharpe/Sortino/profit factor, funding fees, leverage |
+| TODO-006 | Multi-Pair / Portfolio | P1 | Large | **Done** — PortfolioManager with per-pair + total exposure limits, max trades, correlation check, PnL tracking |
+| TODO-007 | REST API for Bot Control | P1 | Medium | **Done** — axum-based API service with status/trades/profit/balance/forceexit/start/stop, API key auth, CORS, health endpoint |
+| TODO-008 | Advanced AI/ML Pipeline | P1 | XL | **Done** — MultiTimeframeFeatures, CorrelatedPairFeatures, ModelManager (sliding-window retraining + expiration), DissimilarityIndex outlier detection |
+| TODO-009 | Webhook Notifications | P2 | Small | **Done** — WebhookNotifier (HTTP POST + templates + retries), DiscordNotifier (rich embeds) |
+| TODO-010 | Plotting & Visualization | P2 | Medium | **Done** — ChartData with Plotly.js HTML generation, candlestick/indicator/signal/equity charts |
+| TODO-011 | Telegram Interactive Bot | P2 | Medium | **Done** — InteractiveTelegramBot with command parsing (/status, /profit, /balance, /forceexit, etc.), authorization |
+| TODO-012 | CLI Utility Commands | P2 | Small | **Done** — trade-ssm CLI with list-pairs, list-timeframes, show-config, new-strategy, show-trades, plot, help |
+| TODO-013 | Producer/Consumer Multi-Bot | P2 | Large | **Done** — NATS-based Producer/Consumer with AnalyzedData broadcast, multi-producer subscription |
+| TODO-014 | Multi-Exchange Support | P3 | XL | **Done** — Exchange trait, BinanceClient + BybitClient implementations, create_exchange() factory |
+| TODO-015 | Edge Positioning | P3 | Medium | **Done** — EdgeAnalyzer (win rate, expectancy, risk-reward), pair filtering, Kelly sizing |
+| TODO-016 | Leverage & Margin Modes | P3 | Medium | **Done** — LeverageManager (margin calc, liquidation price, buffer check, funding fees), Isolated/Cross modes |
+| TODO-017 | Advanced RL Agents | P3 | Large | **Done** — PpoAgent (softmax policy, value function, GAE, clipped updates), ReplayBuffer, AIModel impl |
+| TODO-018 | Protection Plugins | P1 | Medium | **Done** — StoplossGuard, MaxDrawdownProtection, CooldownPeriod, LowProfitPairs, ProtectionStack |
+| TODO-019 | Pairlist Plugins & Filters | P2 | Medium | **Done** — StaticPairList (regex), VolumePairList, PriceFilter, SpreadFilter, VolatilityFilter, FilterChain |
 
 ---
 
