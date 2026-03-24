@@ -180,6 +180,7 @@ jobs:
     if: always() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true' && (needs.check.result == 'failure' || needs.test.result == 'failure' || needs.build.result == 'failure')
     steps:
       - name: Telegram notification
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
