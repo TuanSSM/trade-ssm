@@ -79,7 +79,7 @@ const NUM_ACTIONS: usize = 5;
 /// Each action has a weight vector of size `num_features`.
 /// Training uses simple policy gradient updates from labeled episodes.
 pub struct TableModel {
-    /// Weight matrix: weights[action_idx][feature_idx].
+    /// Weight matrix: weights\[action_idx\]\[feature_idx\].
     weights: Vec<Vec<f64>>,
     num_features: usize,
     learning_rate: f64,

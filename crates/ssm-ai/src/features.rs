@@ -276,7 +276,7 @@ fn volume_sma(candles: &[Candle], candle_idx: usize, period: usize) -> f64 {
 }
 
 /// Label feature rows with future price movement for supervised training.
-/// Label: 1.0 if close[i+horizon] > close[i], -1.0 if lower, 0.0 if flat.
+/// Label: 1.0 if close\[i+horizon\] > close\[i\], -1.0 if lower, 0.0 if flat.
 pub fn label_features(features: &mut [FeatureRow], candles: &[Candle], horizon: usize) {
     let start = candles.len().saturating_sub(features.len());
     for (i, row) in features.iter_mut().enumerate() {

@@ -277,8 +277,20 @@ jobs:
     if: always() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true' && needs.docker-test.result == 'failure'
     timeout-minutes: 5
     steps:
+      - name: Check secrets
+        id: secrets
+        run: |
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::add-mask::$TELEGRAM_BOT_TOKEN"
+            echo "::add-mask::$TELEGRAM_CHAT_ID"
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
       - name: Telegram notification
-        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
+        if: steps.secrets.outputs.has_token == 'true'
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
