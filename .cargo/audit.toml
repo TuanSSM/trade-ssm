@@ -1,0 +1,9 @@
+# Ignored advisories for cargo-audit / rustsec audit-check
+[advisories]
+ignore = [
+    # rustls-pemfile is unmaintained — functionality moved to rustls-pki-types.
+    # Transitive dep via async-nats -> rustls-native-certs 0.7.x.
+    # async-nats hasn't updated to rustls-native-certs 0.8+ yet.
+    # No security impact — just an unmaintained crate notice.
+    "RUSTSEC-2024-0404",
+]
