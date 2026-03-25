@@ -2,8 +2,12 @@
 [advisories]
 ignore = [
     # rustls-pemfile is unmaintained — functionality moved to rustls-pki-types.
-    # Transitive dep via async-nats -> rustls-native-certs 0.7.x.
+    # Transitive dep via async-nats 0.46.0 -> rustls-native-certs 0.7.x.
     # async-nats hasn't updated to rustls-native-certs 0.8+ yet.
-    # No security impact — just an unmaintained crate notice.
-    "RUSTSEC-2024-0404",
+    "RUSTSEC-2025-0134",
+
+    # rustls-webpki 0.102.8: CRL Distribution Point matching logic bug.
+    # Fix requires >=0.103.10 but async-nats 0.46.0 directly depends on 0.102.x.
+    # Waiting on async-nats to update its rustls-webpki dependency.
+    "RUSTSEC-2026-0049",
 ]
