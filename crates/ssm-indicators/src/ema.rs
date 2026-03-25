@@ -22,8 +22,8 @@ pub fn sma(candles: &[Candle], period: usize) -> Vec<Decimal> {
 /// Compute Exponential Moving Average.
 ///
 /// Multiplier: `2 / (period + 1)`
-/// EMA[0] = SMA of first `period` candles.
-/// EMA[i] = close * multiplier + EMA[i-1] * (1 - multiplier)
+/// EMA\[0\] = SMA of first `period` candles.
+/// EMA\[i\] = close * multiplier + EMA\[i-1\] * (1 - multiplier)
 pub fn ema(candles: &[Candle], period: usize) -> Vec<Decimal> {
     if candles.len() < period || period == 0 {
         return vec![];

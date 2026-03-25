@@ -107,7 +107,7 @@ impl ExecutionEngine {
     /// Submit a raw order synchronously (paper mode only).
     ///
     /// For live mode without a LiveEngine attached, the order stays Pending.
-    /// Use [`submit_order_async`] for live exchange execution.
+    /// Use `submit_order_async` for live exchange execution.
     pub fn submit_order(&mut self, mut order: Order, current_price: Decimal) -> Result<Order> {
         match self.mode {
             ExecutionMode::Paper => {
