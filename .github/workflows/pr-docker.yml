@@ -264,7 +264,7 @@ jobs:
           cat pr-comment.md
 
       - name: Post or update PR comment
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: docker-integration
           path: pr-comment.md
