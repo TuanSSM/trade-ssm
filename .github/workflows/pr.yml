@@ -16,13 +16,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
 
 jobs:
   check:
     name: Lint & Format
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,14 +39,15 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets
 
   test:
     name: Test
     runs-on: ubuntu-latest
     needs: check
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -64,12 +67,43 @@ jobs:
           path: test-output.txt
           retention-days: 7
 
+  # ── Security audit (non-blocking for PRs, advisory) ──
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Doc check ensures no broken doc links ──
+  docs:
+    name: Doc Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-docs
+          save-if: false
+
+      - name: Check docs build
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   build:
     name: Build
     runs-on: ubuntu-latest
     needs: test
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -79,6 +113,13 @@ jobs:
       - name: Build release
         run: cargo build --release --workspace
 
+      - name: Verify key binaries
+        run: |
+          for bin in analyzer download-data backtest rl-backtest; do
+            test -x "target/release/$bin" || { echo "::error::Binary $bin not found"; exit 1; }
+            echo "✓ $bin ($(stat -c%s target/release/$bin | numfmt --to=iec))"
+          done
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -87,14 +128,16 @@ jobs:
             target/release/analyzer
             target/release/download-data
             target/release/backtest
+            target/release/rl-backtest
           retention-days: 3
 
   # ── Post visible PR comment with test + build results ──
   pr-report:
     name: PR Report
     runs-on: ubuntu-latest
-    needs: [check, test, build]
+    needs: [check, test, build, audit, docs]
     if: always()
+    timeout-minutes: 5
     permissions:
       pull-requests: write
     steps:
@@ -111,6 +154,8 @@ jobs:
           CHECK="${{ needs.check.result }}"
           TEST="${{ needs.test.result }}"
           BUILD="${{ needs.build.result }}"
+          AUDIT="${{ needs.audit.result }}"
+          DOCS="${{ needs.docs.result }}"
 
           status_icon() {
             case "$1" in
@@ -129,6 +174,8 @@ jobs:
             echo "| Lint & Format | $(status_icon $CHECK) \`$CHECK\` | rustfmt + clippy |"
             echo "| Tests | $(status_icon $TEST) \`$TEST\` | cargo test --workspace |"
             echo "| Build | $(status_icon $BUILD) \`$BUILD\` | release binaries |"
+            echo "| Security Audit | $(status_icon $AUDIT) \`$AUDIT\` | cargo audit (advisory) |"
+            echo "| Doc Check | $(status_icon $DOCS) \`$DOCS\` | rustdoc -D warnings |"
             echo ""
 
             # Include test output summary if available
@@ -178,10 +225,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [check, test, build]
     if: always() && vars.TELEGRAM_NOTIFICATIONS_ENABLED == 'true' && (needs.check.result == 'failure' || needs.test.result == 'failure' || needs.build.result == 'failure')
+    timeout-minutes: 5
     steps:
       - name: Telegram notification
         if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
-        uses: appleboy/telegram-action@master
+        uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -198,18 +246,21 @@ jobs:
   summary:
     name: PR Status
     runs-on: ubuntu-latest
-    needs: [check, test, build]
+    needs: [check, test, build, docs]
     if: always()
+    timeout-minutes: 5
     steps:
       - name: Check results
         run: |
           if [ "${{ needs.check.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.build.result }}" != "success" ]; then
+             [ "${{ needs.build.result }}" != "success" ] || \
+             [ "${{ needs.docs.result }}" != "success" ]; then
             echo "::error::One or more checks failed"
             echo "  check: ${{ needs.check.result }}"
             echo "  test:  ${{ needs.test.result }}"
             echo "  build: ${{ needs.build.result }}"
+            echo "  docs:  ${{ needs.docs.result }}"
             exit 1
           fi
           echo "All PR checks passed"
