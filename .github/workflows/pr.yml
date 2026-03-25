@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload test output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-test-output-${{ github.event.pull_request.number }}
           path: test-output.txt
@@ -121,7 +121,7 @@ jobs:
           done
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-build-${{ github.event.pull_request.number }}
           path: |
