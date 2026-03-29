@@ -1,13 +1,9 @@
 use anyhow::{Context, Result};
-use ssm_core::Candle;
+use ssm_core::{env_or, Candle, DEFAULT_CVD_WINDOW, DEFAULT_INTERVAL,
+    DEFAULT_MAX_CANDLES, DEFAULT_SYMBOL};
 use ssm_nats::{Publisher, Subscriber};
 use ssm_strategy::traits::Strategy;
 use tokio::sync::mpsc;
-
-const DEFAULT_SYMBOL: &str = "BTCUSDT";
-const DEFAULT_INTERVAL: &str = "15m";
-const CVD_WINDOW: usize = 15;
-const MAX_CANDLE_BUFFER: usize = 200;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,13 +28,13 @@ async fn main() -> Result<()> {
                 ssm_ai::model::TableModel::from_checkpoint(&std::path::PathBuf::from(&model_path))?;
             Box::new(ssm_strategy::ai_strategy::AiStrategy::new(
                 Box::new(model),
-                CVD_WINDOW,
+                DEFAULT_CVD_WINDOW,
             ))
         }
         _ => {
             tracing::info!("using CVD momentum strategy");
             Box::new(ssm_strategy::cvd_momentum::CvdMomentumStrategy::new(
-                CVD_WINDOW,
+                DEFAULT_CVD_WINDOW,
             ))
         }
     };
@@ -59,7 +55,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let mut candle_buffer: Vec<Candle> = Vec::with_capacity(MAX_CANDLE_BUFFER);
+    let mut candle_buffer: Vec<Candle> = Vec::with_capacity(DEFAULT_MAX_CANDLES);
 
     tracing::info!("waiting for candle data");
 
@@ -67,12 +63,12 @@ async fn main() -> Result<()> {
         candle_buffer.push(candle);
 
         // Keep buffer bounded
-        if candle_buffer.len() > MAX_CANDLE_BUFFER {
-            candle_buffer.drain(0..candle_buffer.len() - MAX_CANDLE_BUFFER);
+        if candle_buffer.len() > DEFAULT_MAX_CANDLES {
+            candle_buffer.drain(0..candle_buffer.len() - DEFAULT_MAX_CANDLES);
         }
 
         // Anti-repainting: only analyze closed candles (all candles from NATS should be closed)
-        if candle_buffer.len() >= CVD_WINDOW {
+        if candle_buffer.len() >= DEFAULT_CVD_WINDOW {
             match strategy.analyze(&candle_buffer) {
                 Ok(Some(signal)) => {
                     tracing::info!(
@@ -98,6 +94,3 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}

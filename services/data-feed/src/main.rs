@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
+use ssm_core::{env_or, interval_to_ms, DEFAULT_INTERVAL, DEFAULT_SYMBOL};
 use ssm_exchange::aggregator::TradeAggregator;
 use ssm_exchange::websocket::{BinanceWsClient, WsConfig, WsEvent};
 use ssm_nats::Publisher;
 use tokio::sync::mpsc;
-
-const DEFAULT_SYMBOL: &str = "BTCUSDT";
-const DEFAULT_INTERVAL: &str = "15m";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,7 +23,7 @@ async fn main() -> Result<()> {
     let publisher = Publisher::new(nats_client);
 
     // Create trade aggregator for building candles from raw trades
-    let interval_ms = parse_interval_ms(&interval);
+    let interval_ms = interval_to_ms(&interval);
     let mut aggregator = TradeAggregator::new(&symbol, interval_ms);
 
     // Start WebSocket feed
@@ -103,32 +101,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn parse_interval_ms(interval: &str) -> i64 {
-    match interval {
-        "1m" => 60_000,
-        "3m" => 180_000,
-        "5m" => 300_000,
-        "15m" => 900_000,
-        "30m" => 1_800_000,
-        "1h" => 3_600_000,
-        "4h" => 14_400_000,
-        "1d" => 86_400_000,
-        _ => 900_000, // default 15m
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn interval_parsing() {
-        assert_eq!(parse_interval_ms("1m"), 60_000);
-        assert_eq!(parse_interval_ms("15m"), 900_000);
+        assert_eq!(interval_to_ms("1m"), 60_000);
+        assert_eq!(interval_to_ms("15m"), 900_000);
         assert_eq!(parse_interval_ms("1h"), 3_600_000);
         assert_eq!(parse_interval_ms("4h"), 14_400_000);
     }

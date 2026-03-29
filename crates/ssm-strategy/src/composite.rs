@@ -86,7 +86,10 @@ impl Strategy for CompositeStrategy {
             return Ok(None);
         }
 
-        let last = candles.last().unwrap();
+        let last = match candles.last() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
         Ok(Some(Signal {
             timestamp: last.close_time,
             symbol: String::new(), // Filled by caller
