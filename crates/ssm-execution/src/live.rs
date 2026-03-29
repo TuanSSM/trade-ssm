@@ -54,7 +54,10 @@ impl LiveEngine {
             api_key,
             secret_key,
             base_url: BINANCE_MAINNET.to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
         })
@@ -66,7 +69,10 @@ impl LiveEngine {
             api_key,
             secret_key,
             base_url: BINANCE_MAINNET.to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
         }
@@ -78,7 +84,10 @@ impl LiveEngine {
             api_key,
             secret_key,
             base_url: BINANCE_TESTNET.to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
         }
@@ -95,7 +104,10 @@ impl LiveEngine {
             api_key,
             secret_key,
             base_url: BINANCE_TESTNET.to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
         })
@@ -140,7 +152,7 @@ impl LiveEngine {
             .collect::<Vec<_>>()
             .join("&");
 
-        let signature = self.sign(&query_string);
+        let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v1/order", self.base_url);
 
         let resp = self
@@ -221,7 +233,7 @@ impl LiveEngine {
             .collect::<Vec<_>>()
             .join("&");
 
-        let signature = self.sign(&query_string);
+        let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v1/order", self.base_url);
 
         let resp = self
@@ -261,7 +273,7 @@ impl LiveEngine {
             .collect::<Vec<_>>()
             .join("&");
 
-        let signature = self.sign(&query_string);
+        let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v1/order", self.base_url);
 
         let resp = self
@@ -317,7 +329,7 @@ impl LiveEngine {
             .collect::<Vec<_>>()
             .join("&");
 
-        let signature = self.sign(&query_string);
+        let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v1/order", self.base_url);
 
         let resp = self
@@ -369,7 +381,7 @@ impl LiveEngine {
     pub async fn fetch_balance(&self) -> Result<Vec<BalanceInfo>> {
         let timestamp = chrono::Utc::now().timestamp_millis();
         let query_string = format!("timestamp={timestamp}");
-        let signature = self.sign(&query_string);
+        let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v2/balance", self.base_url);
 
         let resp = self
@@ -419,7 +431,7 @@ impl LiveEngine {
     pub async fn fetch_positions(&self) -> Result<Vec<PositionInfo>> {
         let timestamp = chrono::Utc::now().timestamp_millis();
         let query_string = format!("timestamp={timestamp}");
-        let signature = self.sign(&query_string);
+        let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v2/positionRisk", self.base_url);
 
         let resp = self
@@ -484,7 +496,10 @@ impl LiveEngine {
                 Err(e) => {
                     last_err = Some(e);
                     if attempt < self.max_retries {
-                        let delay = self.base_delay * 2u32.pow(attempt);
+                        let base = self.base_delay * 2u32.pow(attempt);
+                        // Add jitter: 75%-125% of base delay
+                        let jitter_pct = ((attempt as u64 * 37 + 13) % 51) + 75; // deterministic pseudo-jitter
+                        let delay = base * jitter_pct as u32 / 100;
                         tracing::warn!(
                             attempt = attempt + 1,
                             max = self.max_retries,
@@ -500,17 +515,17 @@ impl LiveEngine {
     }
 
     /// HMAC-SHA256 signature for Binance API.
-    fn sign(&self, message: &str) -> String {
+    fn sign(&self, message: &str) -> Result<String> {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac =
-            HmacSha256::new_from_slice(self.secret_key.as_bytes()).expect("HMAC key length");
+        let mut mac = HmacSha256::new_from_slice(self.secret_key.as_bytes())
+            .map_err(|e| crate::error::ExecutionError::SigningError(e.to_string()))?;
         mac.update(message.as_bytes());
         let result = mac.finalize();
-        hex::encode(result.into_bytes())
+        Ok(hex::encode(result.into_bytes()))
     }
 }
 
@@ -521,17 +536,17 @@ mod tests {
     #[test]
     fn sign_produces_hex() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig = engine.sign("test_message");
+        let sig = engine.sign("test_message").unwrap();
         // Should be 64-char hex string (SHA256 = 32 bytes)
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(sig.chars().all(|c: char| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn test_sign_deterministic() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig1 = engine.sign("same_message");
-        let sig2 = engine.sign("same_message");
+        let sig1 = engine.sign("same_message").unwrap();
+        let sig2 = engine.sign("same_message").unwrap();
         assert_eq!(sig1, sig2);
     }
 
@@ -539,50 +554,51 @@ mod tests {
     fn test_sign_different_keys() {
         let engine1 = LiveEngine::new("api_key".into(), "secret_one".into());
         let engine2 = LiveEngine::new("api_key".into(), "secret_two".into());
-        let sig1 = engine1.sign("test_message");
-        let sig2 = engine2.sign("test_message");
+        let sig1 = engine1.sign("test_message").unwrap();
+        let sig2 = engine2.sign("test_message").unwrap();
         assert_ne!(sig1, sig2);
     }
 
     #[test]
     fn test_sign_different_messages() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig1 = engine.sign("message_one");
-        let sig2 = engine.sign("message_two");
+        let sig1 = engine.sign("message_one").unwrap();
+        let sig2 = engine.sign("message_two").unwrap();
         assert_ne!(sig1, sig2);
     }
 
     #[test]
     fn test_sign_empty_message() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig = engine.sign("");
+        let sig = engine.sign("").unwrap();
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(sig.chars().all(|c: char| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn test_sign_long_message() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
         let long_msg = "a".repeat(10_000);
-        let sig = engine.sign(&long_msg);
+        let sig = engine.sign(&long_msg).unwrap();
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(sig.chars().all(|c: char| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn test_sign_special_characters() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig =
-            engine.sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890");
+        let sig = engine
+            .sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890")
+            .unwrap();
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(sig.chars().all(|c: char| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn test_live_engine_new_stores_credentials() {
         let engine = LiveEngine::new("my_api_key".into(), "my_secret".into());
         // Verify the engine was created (we can only test sign since fields are private)
-        let sig = engine.sign("test");
+        let sig = engine.sign("test").unwrap();
         assert_eq!(sig.len(), 64);
     }
 
@@ -630,7 +646,10 @@ mod tests {
             api_key: "key".into(),
             secret_key: "secret".into(),
             base_url: BINANCE_MAINNET.into(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             max_retries: 1,
             base_delay: Duration::from_millis(1), // fast for testing
         };
@@ -659,7 +678,10 @@ mod tests {
             api_key: "key".into(),
             secret_key: "secret".into(),
             base_url: BINANCE_MAINNET.into(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             max_retries: 3,
             base_delay: Duration::from_millis(1),
         };

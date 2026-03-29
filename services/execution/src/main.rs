@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use ssm_core::{AIAction, ExecutionMode, Signal, Trade};
+use ssm_core::{
+    env_or, AIAction, ExecutionMode, Signal, Trade, DEFAULT_EXECUTION_MODE, DEFAULT_SYMBOL,
+};
 use ssm_execution::engine::ExecutionEngine;
 use ssm_execution::risk::{RiskConfig, RiskManager};
 use ssm_nats::{Publisher, Subscriber};
@@ -8,7 +10,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-const DEFAULT_SYMBOL: &str = "BTCUSDT";
 const DEFAULT_QUANTITY: &str = "0.001";
 const MARK_TO_MARKET_INTERVAL_SECS: u64 = 10;
 
@@ -21,7 +22,7 @@ async fn main() -> Result<()> {
         .init();
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
-    let mode = match env_or("EXECUTION_MODE", "paper").as_str() {
+    let mode = match env_or("EXECUTION_MODE", DEFAULT_EXECUTION_MODE).as_str() {
         "live" => ExecutionMode::Live,
         _ => ExecutionMode::Paper,
     };
@@ -170,8 +171,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use rust_decimal::Decimal;
 use ssm_core::{ExecutionMode, Order, OrderStatus, OrderType, Side, Signal};
 
+use crate::error::ExecutionError;
 use crate::live::LiveEngine;
 use crate::paper::PaperEngine;
 use crate::position_tracker::PositionTracker;
@@ -83,9 +84,7 @@ impl ExecutionEngine {
         let side = match signal.action {
             ssm_core::AIAction::EnterLong | ssm_core::AIAction::ExitShort => Side::Buy,
             ssm_core::AIAction::EnterShort | ssm_core::AIAction::ExitLong => Side::Sell,
-            ssm_core::AIAction::Neutral => {
-                anyhow::bail!("cannot submit order for Neutral action")
-            }
+            ssm_core::AIAction::Neutral => return Err(ExecutionError::NeutralAction.into()),
         };
 
         let order = self.create_market_order(&signal.symbol, side, quantity, current_price)?;
@@ -144,10 +143,7 @@ impl ExecutionEngine {
                 }
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
                 live.submit_order(&mut order, current_price).await?;
 
                 // Update positions based on exchange response
@@ -190,9 +186,7 @@ impl ExecutionEngine {
         let side = match signal.action {
             ssm_core::AIAction::EnterLong | ssm_core::AIAction::ExitShort => Side::Buy,
             ssm_core::AIAction::EnterShort | ssm_core::AIAction::ExitLong => Side::Sell,
-            ssm_core::AIAction::Neutral => {
-                anyhow::bail!("cannot submit order for Neutral action")
-            }
+            ssm_core::AIAction::Neutral => return Err(ExecutionError::NeutralAction.into()),
         };
 
         let now = chrono::Utc::now().timestamp_millis();
@@ -239,10 +233,7 @@ impl ExecutionEngine {
                 Ok(())
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
                 live.cancel_order(symbol, order_id).await
             }
         }
@@ -258,10 +249,7 @@ impl ExecutionEngine {
                 Ok(OrderStatus::Pending)
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
                 live.query_order(symbol, order_id).await
             }
         }
@@ -278,10 +266,7 @@ impl ExecutionEngine {
                 Ok(())
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("live engine not configured"))?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
 
                 tracing::info!("running live preflight checks");
 
@@ -289,7 +274,7 @@ impl ExecutionEngine {
                 let balances = live
                     .fetch_balance()
                     .await
-                    .map_err(|e| anyhow::anyhow!("preflight balance check failed: {e}"))?;
+                    .map_err(|e| ExecutionError::PreflightFailed(format!("balance check: {e}")))?;
 
                 let total_available: Decimal = balances.iter().map(|b| b.available).sum();
 
@@ -300,14 +285,16 @@ impl ExecutionEngine {
                 );
 
                 if total_available <= Decimal::ZERO {
-                    anyhow::bail!("preflight failed: no available balance");
+                    return Err(
+                        ExecutionError::PreflightFailed("no available balance".into()).into(),
+                    );
                 }
 
                 // Fetch open positions
                 let positions = live
                     .fetch_positions()
                     .await
-                    .map_err(|e| anyhow::anyhow!("preflight position check failed: {e}"))?;
+                    .map_err(|e| ExecutionError::PreflightFailed(format!("position check: {e}")))?;
 
                 tracing::info!(open_positions = positions.len(), "position check passed");
 

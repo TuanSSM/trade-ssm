@@ -9,8 +9,16 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY services services
 
-# Build all binaries in one layer for cache efficiency
-RUN cargo build --release --bin analyzer --bin download-data --bin backtest --bin rl-backtest
+# Build all service binaries in one layer for cache efficiency
+RUN cargo build --release \
+    --bin analyzer \
+    --bin download-data \
+    --bin backtest \
+    --bin rl-backtest \
+    --bin rl-trainer \
+    --bin data-feed \
+    --bin signal-service \
+    --bin execution-service
 
 FROM debian:bookworm-slim
 
@@ -24,6 +32,10 @@ COPY --from=builder /app/target/release/analyzer /usr/local/bin/analyzer
 COPY --from=builder /app/target/release/download-data /usr/local/bin/download-data
 COPY --from=builder /app/target/release/backtest /usr/local/bin/backtest
 COPY --from=builder /app/target/release/rl-backtest /usr/local/bin/rl-backtest
+COPY --from=builder /app/target/release/rl-trainer /usr/local/bin/rl-trainer
+COPY --from=builder /app/target/release/data-feed /usr/local/bin/data-feed
+COPY --from=builder /app/target/release/signal-service /usr/local/bin/signal-service
+COPY --from=builder /app/target/release/execution-service /usr/local/bin/execution-service
 
 RUN mkdir -p /app/user_data
 WORKDIR /app

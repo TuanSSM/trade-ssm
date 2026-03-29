@@ -1,13 +1,13 @@
 use anyhow::Result;
+#[allow(unused_imports)]
+use ssm_core::{
+    env_or, env_parse, DEFAULT_CHECK_INTERVAL_SECS, DEFAULT_CVD_WINDOW, DEFAULT_INTERVAL,
+    DEFAULT_SYMBOL,
+};
 use ssm_exchange::binance::BinanceClient;
 use ssm_indicators::cvd::analyze_cvd;
 use ssm_indicators::liquidations::analyze_liquidations;
 use ssm_notify::telegram::{format_report, TelegramBot};
-
-const DEFAULT_SYMBOL: &str = "BTCUSDT";
-const DEFAULT_INTERVAL: &str = "15m";
-const CVD_WINDOW: usize = 15;
-const DEFAULT_CHECK_SECS: u64 = 60;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,16 +22,14 @@ async fn main() -> Result<()> {
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
-    let check_secs: u64 = std::env::var("CHECK_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_CHECK_SECS);
+    let check_secs: u64 = env_parse("CHECK_INTERVAL_SECS", DEFAULT_CHECK_INTERVAL_SECS);
 
     tracing::info!(%symbol, %interval, check_secs, "trade-ssm analyzer starting");
 
     telegram
         .send_message(&format!(
-            "*trade-ssm started*\n{symbol} {interval} | CVD window: {CVD_WINDOW} | interval: {check_secs}s"
+            "*trade-ssm started*\n{symbol} {interval} | CVD window: {} | interval: {check_secs}s",
+            DEFAULT_CVD_WINDOW
         ))
         .await?;
 
@@ -51,7 +49,7 @@ async fn run_cycle(
     interval: &str,
 ) -> Result<()> {
     let candles = binance
-        .fetch_futures_klines(symbol, interval, (CVD_WINDOW + 1) as u32)
+        .fetch_futures_klines(symbol, interval, (DEFAULT_CVD_WINDOW + 1) as u32)
         .await?;
 
     // Anti-repainting: drop the forming (last) candle
@@ -62,7 +60,7 @@ async fn run_cycle(
     };
     tracing::info!(closed = closed.len(), "fetched candles");
 
-    let cvd = analyze_cvd(closed, CVD_WINDOW);
+    let cvd = analyze_cvd(closed, DEFAULT_CVD_WINDOW);
     let liqs = binance.fetch_liquidations(symbol, 100).await?;
     let liq_summary = analyze_liquidations(&liqs);
 
@@ -73,6 +71,26 @@ async fn run_cycle(
         .await
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_defaults() {
+        assert_eq!(DEFAULT_SYMBOL, "BTCUSDT");
+        assert_eq!(DEFAULT_INTERVAL, "15m");
+        assert_eq!(DEFAULT_CVD_WINDOW, 15);
+        assert_eq!(DEFAULT_CHECK_INTERVAL_SECS, 60);
+    }
+
+    #[test]
+    fn binance_client_creates() {
+        let _client = BinanceClient::new();
+    }
+
+    #[test]
+    fn env_or_defaults() {
+        let symbol = env_or("__NONEXISTENT_VAR__", DEFAULT_SYMBOL);
+        assert_eq!(symbol, "BTCUSDT");
+    }
 }

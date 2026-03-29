@@ -1,4 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+use ssm_core::{
+    env_or, env_parse, DEFAULT_DATADIR, DEFAULT_DOWNLOAD_DAYS, DEFAULT_INTERVAL, DEFAULT_SYMBOL,
+};
 use ssm_exchange::binance::BinanceClient;
 use ssm_exchange::history;
 use std::path::PathBuf;
@@ -12,12 +15,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let symbol = env_or("SYMBOL", "BTCUSDT");
-    let interval = env_or("INTERVAL", "15m");
-    let days: i64 = env_or("DAYS", "30")
-        .parse()
-        .context("DAYS must be integer")?;
-    let datadir = env_or("DATADIR", "user_data");
+    let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
+    let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
+    let days: i64 = env_parse("DAYS", DEFAULT_DOWNLOAD_DAYS as i64);
+    let datadir = env_or("DATADIR", DEFAULT_DATADIR);
 
     let end = chrono::Utc::now();
     let start = end - chrono::Duration::days(days);
@@ -62,13 +63,33 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
 fn format_epoch_date(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .unwrap_or_default()
         .format("%Y%m%d")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_epoch_date() {
+        // 2021-01-01 00:00:00 UTC
+        assert_eq!(format_epoch_date(1609459200000), "20210101");
+    }
+
+    #[test]
+    fn test_format_epoch_date_zero() {
+        assert_eq!(format_epoch_date(0), "19700101");
+    }
+
+    #[test]
+    fn config_defaults() {
+        let symbol = env_or("__NONEXISTENT__", DEFAULT_SYMBOL);
+        assert_eq!(symbol, "BTCUSDT");
+        let days: i64 = env_parse("__NONEXISTENT__", DEFAULT_DOWNLOAD_DAYS as i64);
+        assert_eq!(days, 30);
+    }
 }

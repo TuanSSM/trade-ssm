@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use ssm_core::{Candle, ForceOrderResponse, Liquidation};
 use std::str::FromStr;
 
+use crate::error::ExchangeError;
 use crate::exchange_trait::{Exchange, PairInfo};
 
 const FUTURES_BASE: &str = "https://fapi.binance.com";
@@ -15,7 +16,10 @@ pub struct BinanceClient {
 impl BinanceClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -43,7 +47,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Binance futures klines API returned {status}: {body}");
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
@@ -77,7 +85,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Binance futures klines range API returned {status}: {body}");
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
@@ -98,7 +110,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Binance liquidations API returned {status}: {body}");
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let orders: Vec<ForceOrderResponse> = resp.json().await?;
@@ -149,7 +165,7 @@ impl Exchange for BinanceClient {
 
     async fn list_pairs(&self) -> Result<Vec<PairInfo>> {
         // Stub: would call /fapi/v1/exchangeInfo
-        anyhow::bail!("list_pairs not yet implemented for Binance")
+        Err(ExchangeError::Unimplemented("list_pairs for Binance".into()).into())
     }
 
     fn supported_timeframes(&self) -> Vec<&str> {
