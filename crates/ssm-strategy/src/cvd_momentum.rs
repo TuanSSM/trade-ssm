@@ -21,8 +21,8 @@ impl CvdMomentumStrategy {
         Self {
             window,
             min_confidence: 0.6,
-            symbol: String::new(), // Filled by caller
-            dca_threshold: Decimal::new(-3, 2), // DCA when position is -3%
+            symbol: String::new(),                 // Filled by caller
+            dca_threshold: Decimal::new(-3, 2),    // DCA when position is -3%
             dca_quantity_pct: Decimal::new(50, 2), // DCA 50% of original size
         }
     }
@@ -339,7 +339,9 @@ mod tests {
 
     #[test]
     fn signal_symbol_is_btcusdt() {
-        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let strategy = CvdMomentumStrategy::new(5)
+            .with_symbol("BTCUSDT")
+            .with_min_confidence(0.0);
         let candles: Vec<_> = (0..10).map(|_| candle("80", "20")).collect();
         let signal = strategy.analyze(&candles).unwrap().unwrap();
         assert_eq!(signal.symbol, "BTCUSDT");

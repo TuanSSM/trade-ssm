@@ -109,7 +109,7 @@ mod tests {
     fn interval_parsing() {
         assert_eq!(interval_to_ms("1m"), 60_000);
         assert_eq!(interval_to_ms("15m"), 900_000);
-        assert_eq!(parse_interval_ms("1h"), 3_600_000);
-        assert_eq!(parse_interval_ms("4h"), 14_400_000);
+        assert_eq!(interval_to_ms("1h"), 3_600_000);
+        assert_eq!(interval_to_ms("4h"), 14_400_000);
     }
 }

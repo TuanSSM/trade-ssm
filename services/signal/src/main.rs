@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use ssm_core::{env_or, Candle, DEFAULT_CVD_WINDOW, DEFAULT_INTERVAL,
-    DEFAULT_MAX_CANDLES, DEFAULT_SYMBOL};
+use ssm_core::{
+    env_or, Candle, DEFAULT_CVD_WINDOW, DEFAULT_INTERVAL, DEFAULT_MAX_CANDLES, DEFAULT_SYMBOL,
+};
 use ssm_nats::{Publisher, Subscriber};
 use ssm_strategy::traits::Strategy;
 use tokio::sync::mpsc;
@@ -93,4 +94,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-

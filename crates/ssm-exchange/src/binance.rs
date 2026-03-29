@@ -47,7 +47,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ExchangeError::ApiError { status: status.to_string(), body }.into());
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
@@ -81,7 +85,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ExchangeError::ApiError { status: status.to_string(), body }.into());
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let raw: Vec<Vec<serde_json::Value>> = resp.json().await?;
@@ -102,7 +110,11 @@ impl BinanceClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ExchangeError::ApiError { status: status.to_string(), body }.into());
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let orders: Vec<ForceOrderResponse> = resp.json().await?;

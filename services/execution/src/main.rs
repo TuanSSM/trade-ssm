@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use ssm_core::{env_or, AIAction, ExecutionMode, Signal, Trade, DEFAULT_EXECUTION_MODE, DEFAULT_SYMBOL};
+use ssm_core::{
+    env_or, AIAction, ExecutionMode, Signal, Trade, DEFAULT_EXECUTION_MODE, DEFAULT_SYMBOL,
+};
 use ssm_execution::engine::ExecutionEngine;
 use ssm_execution::risk::{RiskConfig, RiskManager};
 use ssm_nats::{Publisher, Subscriber};

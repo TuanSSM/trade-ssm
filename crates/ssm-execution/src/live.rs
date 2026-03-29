@@ -521,9 +521,8 @@ impl LiveEngine {
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac =
-            HmacSha256::new_from_slice(self.secret_key.as_bytes())
-                .map_err(|e| crate::error::ExecutionError::SigningError(e.to_string()))?;
+        let mut mac = HmacSha256::new_from_slice(self.secret_key.as_bytes())
+            .map_err(|e| crate::error::ExecutionError::SigningError(e.to_string()))?;
         mac.update(message.as_bytes());
         let result = mac.finalize();
         Ok(hex::encode(result.into_bytes()))
@@ -588,8 +587,9 @@ mod tests {
     #[test]
     fn test_sign_special_characters() {
         let engine = LiveEngine::new("api_key".into(), "secret_key".into());
-        let sig =
-            engine.sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890").unwrap();
+        let sig = engine
+            .sign("symbol=BTCUSDT&side=BUY&type=MARKET&quantity=1&timestamp=1234567890")
+            .unwrap();
         assert_eq!(sig.len(), 64);
         assert!(sig.chars().all(|c: char| c.is_ascii_hexdigit()));
     }

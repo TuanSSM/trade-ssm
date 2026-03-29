@@ -51,7 +51,7 @@ pub fn create_exchange(name: &str) -> Result<Box<dyn Exchange>> {
     match name {
         "binance" => Ok(Box::new(BinanceClient::new())),
         "bybit" => Ok(Box::new(BybitClient::new())),
-        _ => return Err(ExchangeError::UnknownExchange(name.into()).into()),
+        _ => Err(ExchangeError::UnknownExchange(name.into()).into()),
     }
 }
 

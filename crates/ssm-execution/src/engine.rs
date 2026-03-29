@@ -84,9 +84,7 @@ impl ExecutionEngine {
         let side = match signal.action {
             ssm_core::AIAction::EnterLong | ssm_core::AIAction::ExitShort => Side::Buy,
             ssm_core::AIAction::EnterShort | ssm_core::AIAction::ExitLong => Side::Sell,
-            ssm_core::AIAction::Neutral => {
-                return Err(ExecutionError::NeutralAction.into())
-            }
+            ssm_core::AIAction::Neutral => return Err(ExecutionError::NeutralAction.into()),
         };
 
         let order = self.create_market_order(&signal.symbol, side, quantity, current_price)?;
@@ -145,10 +143,7 @@ impl ExecutionEngine {
                 }
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or(ExecutionError::NoLiveEngine)?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
                 live.submit_order(&mut order, current_price).await?;
 
                 // Update positions based on exchange response
@@ -191,9 +186,7 @@ impl ExecutionEngine {
         let side = match signal.action {
             ssm_core::AIAction::EnterLong | ssm_core::AIAction::ExitShort => Side::Buy,
             ssm_core::AIAction::EnterShort | ssm_core::AIAction::ExitLong => Side::Sell,
-            ssm_core::AIAction::Neutral => {
-                return Err(ExecutionError::NeutralAction.into())
-            }
+            ssm_core::AIAction::Neutral => return Err(ExecutionError::NeutralAction.into()),
         };
 
         let now = chrono::Utc::now().timestamp_millis();
@@ -240,10 +233,7 @@ impl ExecutionEngine {
                 Ok(())
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or(ExecutionError::NoLiveEngine)?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
                 live.cancel_order(symbol, order_id).await
             }
         }
@@ -259,10 +249,7 @@ impl ExecutionEngine {
                 Ok(OrderStatus::Pending)
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or(ExecutionError::NoLiveEngine)?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
                 live.query_order(symbol, order_id).await
             }
         }
@@ -279,10 +266,7 @@ impl ExecutionEngine {
                 Ok(())
             }
             ExecutionMode::Live => {
-                let live = self
-                    .live
-                    .as_ref()
-                    .ok_or(ExecutionError::NoLiveEngine)?;
+                let live = self.live.as_ref().ok_or(ExecutionError::NoLiveEngine)?;
 
                 tracing::info!("running live preflight checks");
 
@@ -301,7 +285,9 @@ impl ExecutionEngine {
                 );
 
                 if total_available <= Decimal::ZERO {
-                    return Err(ExecutionError::PreflightFailed("no available balance".into()).into());
+                    return Err(
+                        ExecutionError::PreflightFailed("no available balance".into()).into(),
+                    );
                 }
 
                 // Fetch open positions

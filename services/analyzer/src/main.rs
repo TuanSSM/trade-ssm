@@ -1,6 +1,9 @@
 use anyhow::Result;
-use ssm_core::{env_or, env_parse, DEFAULT_CHECK_INTERVAL_SECS, DEFAULT_CVD_WINDOW,
-    DEFAULT_INTERVAL, DEFAULT_SYMBOL};
+#[allow(unused_imports)]
+use ssm_core::{
+    env_or, env_parse, DEFAULT_CHECK_INTERVAL_SECS, DEFAULT_CVD_WINDOW, DEFAULT_INTERVAL,
+    DEFAULT_SYMBOL,
+};
 use ssm_exchange::binance::BinanceClient;
 use ssm_indicators::cvd::analyze_cvd;
 use ssm_indicators::liquidations::analyze_liquidations;
@@ -68,3 +71,26 @@ async fn run_cycle(
         .await
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_defaults() {
+        assert_eq!(DEFAULT_SYMBOL, "BTCUSDT");
+        assert_eq!(DEFAULT_INTERVAL, "15m");
+        assert_eq!(DEFAULT_CVD_WINDOW, 15);
+        assert_eq!(DEFAULT_CHECK_INTERVAL_SECS, 60);
+    }
+
+    #[test]
+    fn binance_client_creates() {
+        let _client = BinanceClient::new();
+    }
+
+    #[test]
+    fn env_or_defaults() {
+        let symbol = env_or("__NONEXISTENT_VAR__", DEFAULT_SYMBOL);
+        assert_eq!(symbol, "BTCUSDT");
+    }
+}

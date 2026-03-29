@@ -83,7 +83,11 @@ struct KlineResult {
 /// Parse a Bybit kline entry: [startTime, open, high, low, close, volume, turnover]
 fn parse_bybit_kline(k: &[String], interval: &str) -> Result<Candle> {
     if k.len() < 7 {
-        return Err(ExchangeError::ParseError(format!("bybit kline has {} fields, expected 7", k.len())).into());
+        return Err(ExchangeError::ParseError(format!(
+            "bybit kline has {} fields, expected 7",
+            k.len()
+        ))
+        .into());
     }
 
     let open_time: i64 = k[0].parse().context("open_time")?;
@@ -158,12 +162,20 @@ impl Exchange for BybitClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ExchangeError::ApiError { status: status.to_string(), body }.into());
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let body: BybitResponse<KlineResult> = resp.json().await?;
         if body.ret_code != 0 {
-            return Err(ExchangeError::ExchangeApiError { code: body.ret_code, message: body.ret_msg }.into());
+            return Err(ExchangeError::ExchangeApiError {
+                code: body.ret_code,
+                message: body.ret_msg,
+            }
+            .into());
         }
 
         // Bybit returns newest first; reverse to match Binance convention (oldest first).
@@ -206,12 +218,20 @@ impl Exchange for BybitClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ExchangeError::ApiError { status: status.to_string(), body }.into());
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let body: BybitResponse<KlineResult> = resp.json().await?;
         if body.ret_code != 0 {
-            return Err(ExchangeError::ExchangeApiError { code: body.ret_code, message: body.ret_msg }.into());
+            return Err(ExchangeError::ExchangeApiError {
+                code: body.ret_code,
+                message: body.ret_msg,
+            }
+            .into());
         }
 
         let mut candles: Vec<Candle> = body

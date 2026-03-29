@@ -92,7 +92,7 @@ fn run_strategy_backtest(candles: &[Candle], window: usize, path: &Path) -> Resu
             return None;
         }
 
-        let last = closed.last().unwrap();
+        let last = closed.last()?;
         Some(Signal {
             timestamp: last.open_time,
             symbol: String::from("BACKTEST"),

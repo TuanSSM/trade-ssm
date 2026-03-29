@@ -2,7 +2,6 @@
 ///
 /// Each service can use these defaults and parsing utilities to avoid
 /// duplicating env var handling across binaries.
-
 /// Default trading symbol.
 pub const DEFAULT_SYMBOL: &str = "BTCUSDT";
 
