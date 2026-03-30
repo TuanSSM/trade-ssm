@@ -148,7 +148,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: trade-ssm-binaries-${{ github.sha }}
           path: bin
@@ -180,7 +180,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: trade-ssm-binaries-${{ github.sha }}
           path: bin
