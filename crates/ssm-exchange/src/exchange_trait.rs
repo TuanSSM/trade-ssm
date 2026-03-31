@@ -5,6 +5,7 @@ use ssm_core::{Candle, Liquidation};
 
 use crate::binance::BinanceClient;
 use crate::bybit::BybitClient;
+use crate::error::ExchangeError;
 
 /// Abstract exchange interface.
 #[async_trait]
@@ -50,7 +51,7 @@ pub fn create_exchange(name: &str) -> Result<Box<dyn Exchange>> {
     match name {
         "binance" => Ok(Box::new(BinanceClient::new())),
         "bybit" => Ok(Box::new(BybitClient::new())),
-        _ => anyhow::bail!("unknown exchange: {name}"),
+        _ => Err(ExchangeError::UnknownExchange(name.into()).into()),
     }
 }
 

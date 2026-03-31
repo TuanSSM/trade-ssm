@@ -21,6 +21,51 @@ pub struct Candle {
     pub taker_sell_volume: Decimal,
 }
 
+/// Newtype wrapper guaranteeing the slice contains only closed (finalized) candles.
+///
+/// The forming (current) candle must be excluded before constructing this type.
+/// This provides compile-time anti-repainting safety — indicators and strategies
+/// that accept `&ClosedCandles` are guaranteed to only see finalized data.
+#[derive(Debug)]
+pub struct ClosedCandles<'a>(&'a [Candle]);
+
+impl<'a> ClosedCandles<'a> {
+    /// Create from a candle slice, dropping the last (forming) candle.
+    /// Returns `None` if the input has fewer than 2 candles.
+    pub fn from_slice_drop_last(candles: &'a [Candle]) -> Option<Self> {
+        if candles.len() < 2 {
+            return None;
+        }
+        Some(Self(&candles[..candles.len() - 1]))
+    }
+
+    /// Create from a slice that is already known to be all closed candles.
+    /// Use this when candles come from historical data or NATS (already closed).
+    pub fn from_closed(candles: &'a [Candle]) -> Self {
+        Self(candles)
+    }
+
+    /// Access the inner candle slice.
+    pub fn as_slice(&self) -> &[Candle] {
+        self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'a> std::ops::Deref for ClosedCandles<'a> {
+    type Target = [Candle];
+    fn deref(&self) -> &[Candle] {
+        self.0
+    }
+}
+
 /// Single trade tick (aggr.trade-inspired in-candle resolution).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {

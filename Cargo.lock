@@ -535,6 +535,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "ssm-core",
  "ssm-exchange",
  "tokio",
  "tracing",

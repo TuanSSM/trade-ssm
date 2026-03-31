@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use rust_decimal::prelude::ToPrimitive;
-use ssm_core::{AIAction, Candle, Signal};
+use ssm_core::{env_parse, AIAction, Candle, Signal, DEFAULT_CVD_WINDOW};
 use ssm_exchange::history;
 use ssm_execution::backtest::{BacktestConfig, BacktestEngine};
 use ssm_indicators::cvd::{analyze_cvd, CvdTrend};
@@ -19,10 +19,7 @@ fn main() -> Result<()> {
         .init();
 
     let datafile = std::env::var("DATAFILE").context("DATAFILE env var required")?;
-    let window: usize = std::env::var("CVD_WINDOW")
-        .unwrap_or_else(|_| "15".into())
-        .parse()
-        .context("CVD_WINDOW must be integer")?;
+    let window: usize = env_parse("CVD_WINDOW", DEFAULT_CVD_WINDOW);
     let strategy = std::env::var("STRATEGY").ok();
 
     let path = PathBuf::from(&datafile);
@@ -95,7 +92,7 @@ fn run_strategy_backtest(candles: &[Candle], window: usize, path: &Path) -> Resu
             return None;
         }
 
-        let last = closed.last().unwrap();
+        let last = closed.last()?;
         Some(Signal {
             timestamp: last.open_time,
             symbol: String::from("BACKTEST"),

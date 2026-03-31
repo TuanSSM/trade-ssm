@@ -5,11 +5,16 @@ use ssm_core::{Order, OrderStatus, OrderType};
 /// Paper trading engine — simulates order fills locally.
 pub struct PaperEngine {
     filled_count: u64,
+    /// Track the best price seen for each trailing stop order (order_id -> best_price).
+    trailing_best: std::collections::HashMap<String, Decimal>,
 }
 
 impl PaperEngine {
     pub fn new() -> Self {
-        Self { filled_count: 0 }
+        Self {
+            filled_count: 0,
+            trailing_best: std::collections::HashMap::new(),
+        }
     }
 
     pub fn filled_count(&self) -> u64 {
@@ -73,8 +78,53 @@ impl PaperEngine {
                 }
             }
             OrderType::TrailingStop => {
-                // Trailing stop needs price history tracking — simplified here
-                order.status = OrderStatus::Open;
+                // Trailing stop: uses stop_price as callback rate (e.g. 0.01 = 1%).
+                // Tracks the best favorable price and triggers when price retraces
+                // by the callback amount from the best price.
+                if let Some(callback_rate) = order.stop_price {
+                    let best = self
+                        .trailing_best
+                        .entry(order.id.clone())
+                        .or_insert(current_price);
+
+                    // Update best price based on order side
+                    match order.side {
+                        // Sell trailing stop: protecting a long position
+                        ssm_core::Side::Sell => {
+                            if current_price > *best {
+                                *best = current_price;
+                            }
+                            let trigger_price = *best * (Decimal::ONE - callback_rate);
+                            if current_price <= trigger_price {
+                                order.price = Some(current_price);
+                                order.status = OrderStatus::Filled;
+                                order.updated_at = chrono::Utc::now().timestamp_millis();
+                                self.filled_count += 1;
+                                self.trailing_best.remove(&order.id);
+                            } else {
+                                order.status = OrderStatus::Open;
+                            }
+                        }
+                        // Buy trailing stop: protecting a short position
+                        ssm_core::Side::Buy => {
+                            if current_price < *best {
+                                *best = current_price;
+                            }
+                            let trigger_price = *best * (Decimal::ONE + callback_rate);
+                            if current_price >= trigger_price {
+                                order.price = Some(current_price);
+                                order.status = OrderStatus::Filled;
+                                order.updated_at = chrono::Utc::now().timestamp_millis();
+                                self.filled_count += 1;
+                                self.trailing_best.remove(&order.id);
+                            } else {
+                                order.status = OrderStatus::Open;
+                            }
+                        }
+                    }
+                } else {
+                    order.status = OrderStatus::Open;
+                }
             }
         }
 

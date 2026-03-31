@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use ssm_core::{Candle, Liquidation};
 use std::str::FromStr;
 
+use crate::error::ExchangeError;
 use crate::exchange_trait::{Exchange, PairInfo};
 
 const BYBIT_BASE: &str = "https://api.bybit.com";
@@ -17,7 +18,10 @@ pub struct BybitClient {
 impl BybitClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             base_url: BYBIT_BASE.to_string(),
         }
     }
@@ -25,7 +29,10 @@ impl BybitClient {
     /// Create a client with a custom base URL (useful for testing).
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.to_string(),
         }
     }
@@ -76,7 +83,11 @@ struct KlineResult {
 /// Parse a Bybit kline entry: [startTime, open, high, low, close, volume, turnover]
 fn parse_bybit_kline(k: &[String], interval: &str) -> Result<Candle> {
     if k.len() < 7 {
-        anyhow::bail!("bybit kline has {} fields, expected 7", k.len());
+        return Err(ExchangeError::ParseError(format!(
+            "bybit kline has {} fields, expected 7",
+            k.len()
+        ))
+        .into());
     }
 
     let open_time: i64 = k[0].parse().context("open_time")?;
@@ -151,12 +162,20 @@ impl Exchange for BybitClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Bybit kline API returned {status}: {body}");
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let body: BybitResponse<KlineResult> = resp.json().await?;
         if body.ret_code != 0 {
-            anyhow::bail!("Bybit API error {}: {}", body.ret_code, body.ret_msg);
+            return Err(ExchangeError::ExchangeApiError {
+                code: body.ret_code,
+                message: body.ret_msg,
+            }
+            .into());
         }
 
         // Bybit returns newest first; reverse to match Binance convention (oldest first).
@@ -199,12 +218,20 @@ impl Exchange for BybitClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Bybit klines range API returned {status}: {body}");
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
         }
 
         let body: BybitResponse<KlineResult> = resp.json().await?;
         if body.ret_code != 0 {
-            anyhow::bail!("Bybit API error {}: {}", body.ret_code, body.ret_msg);
+            return Err(ExchangeError::ExchangeApiError {
+                code: body.ret_code,
+                message: body.ret_msg,
+            }
+            .into());
         }
 
         let mut candles: Vec<Candle> = body
@@ -225,7 +252,7 @@ impl Exchange for BybitClient {
 
     async fn list_pairs(&self) -> Result<Vec<PairInfo>> {
         // Stub: would call /v5/market/instruments-info
-        anyhow::bail!("list_pairs not yet implemented for Bybit")
+        Err(ExchangeError::Unimplemented("list_pairs for Bybit".into()).into())
     }
 
     fn supported_timeframes(&self) -> Vec<&str> {

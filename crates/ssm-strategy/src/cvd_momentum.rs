@@ -11,6 +11,7 @@ use crate::traits::Strategy;
 pub struct CvdMomentumStrategy {
     window: usize,
     pub min_confidence: f64,
+    symbol: String,
     dca_threshold: Decimal,
     dca_quantity_pct: Decimal,
 }
@@ -20,9 +21,15 @@ impl CvdMomentumStrategy {
         Self {
             window,
             min_confidence: 0.6,
-            dca_threshold: Decimal::new(-3, 2), // DCA when position is -3%
+            symbol: String::new(),                 // Filled by caller
+            dca_threshold: Decimal::new(-3, 2),    // DCA when position is -3%
             dca_quantity_pct: Decimal::new(50, 2), // DCA 50% of original size
         }
+    }
+
+    pub fn with_symbol(mut self, symbol: &str) -> Self {
+        self.symbol = symbol.to_string();
+        self
     }
 
     pub fn with_min_confidence(mut self, c: f64) -> Self {
@@ -62,12 +69,14 @@ impl Strategy for CvdMomentumStrategy {
             return Ok(None);
         }
 
-        let symbol = "BTCUSDT"; // Default; in real use, would come from context
-        let last = candles.last().unwrap();
+        let last = match candles.last() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
 
         Ok(Some(Signal {
             timestamp: last.close_time,
-            symbol: symbol.into(),
+            symbol: self.symbol.clone(),
             action,
             confidence,
             source: self.name().into(),
@@ -330,7 +339,9 @@ mod tests {
 
     #[test]
     fn signal_symbol_is_btcusdt() {
-        let strategy = CvdMomentumStrategy::new(5).with_min_confidence(0.0);
+        let strategy = CvdMomentumStrategy::new(5)
+            .with_symbol("BTCUSDT")
+            .with_min_confidence(0.0);
         let candles: Vec<_> = (0..10).map(|_| candle("80", "20")).collect();
         let signal = strategy.analyze(&candles).unwrap().unwrap();
         assert_eq!(signal.symbol, "BTCUSDT");
