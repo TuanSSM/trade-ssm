@@ -5,12 +5,14 @@ use std::collections::HashMap;
 /// Tracks open positions per symbol.
 pub struct PositionTracker {
     positions: HashMap<String, Position>,
+    last_closed: Vec<String>,
 }
 
 impl PositionTracker {
     pub fn new() -> Self {
         Self {
             positions: HashMap::new(),
+            last_closed: Vec::new(),
         }
     }
 
@@ -30,7 +32,9 @@ impl PositionTracker {
     }
 
     /// Update position state after an order fill.
+    /// After calling this, check `closed_symbols()` for positions that were fully closed.
     pub fn apply_fill(&mut self, order: &Order, fill_price: Decimal) {
+        self.last_closed.clear();
         let now = chrono::Utc::now().timestamp_millis();
 
         // Determine what to do based on current position state
@@ -100,8 +104,10 @@ impl PositionTracker {
         match action {
             Action::Remove => {
                 self.positions.remove(&order.symbol);
+                self.last_closed.push(order.symbol.clone());
             }
             Action::Flip(new_pos) => {
+                self.last_closed.push(order.symbol.clone());
                 self.positions.insert(order.symbol.clone(), new_pos);
             }
             Action::None => {}
@@ -118,6 +124,17 @@ impl PositionTracker {
                 };
             }
         }
+    }
+
+    /// Restore a position from persistent storage (startup recovery).
+    pub fn restore_position(&mut self, pos: Position) {
+        self.positions.insert(pos.symbol.clone(), pos);
+    }
+
+    /// Returns the list of symbols that were removed (positions closed) in the last `apply_fill`.
+    /// This is useful for persisting position removals to the store.
+    pub fn closed_symbols(&self) -> &[String] {
+        &self.last_closed
     }
 }
 

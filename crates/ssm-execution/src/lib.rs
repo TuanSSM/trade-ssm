@@ -11,3 +11,4 @@ pub mod risk;
 pub mod stoploss;
 
 pub use error::ExecutionError;
+pub use ssm_store::TradeStore;

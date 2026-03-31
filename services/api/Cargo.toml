@@ -12,15 +12,16 @@ path = "src/main.rs"
 ssm-core = { workspace = true }
 ssm-execution = { workspace = true }
 ssm-nats = { workspace = true }
+ssm-store = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 axum = "0.8"
+tower = { version = "0.5", features = ["limit", "buffer"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5", features = ["util", "limit", "buffer"] }

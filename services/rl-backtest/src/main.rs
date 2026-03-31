@@ -44,11 +44,7 @@ impl From<FileConfig> for RlConfig {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let datafile = std::env::var("DATAFILE").context("DATAFILE env var required")?;
     let mode = std::env::var("RL_MODE").unwrap_or_else(|_| "single".into());

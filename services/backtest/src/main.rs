@@ -12,11 +12,7 @@ use std::path::{Path, PathBuf};
 /// Set STRATEGY=cvd_momentum to run the full trade-simulation backtest engine
 /// instead of the default CVD replay mode.
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let datafile = std::env::var("DATAFILE").context("DATAFILE env var required")?;
     let window: usize = env_parse("CVD_WINDOW", DEFAULT_CVD_WINDOW);

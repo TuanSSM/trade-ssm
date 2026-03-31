@@ -9,11 +9,7 @@ use std::path::PathBuf;
 /// Usage: download-data [--symbol BTCUSDT] [--interval 15m] [--days 30] [--datadir user_data]
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);

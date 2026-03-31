@@ -5,21 +5,20 @@ use ssm_core::{
 };
 use ssm_execution::engine::ExecutionEngine;
 use ssm_execution::risk::{RiskConfig, RiskManager};
+use ssm_execution::TradeStore;
 use ssm_nats::{Publisher, Subscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+
+const DEFAULT_STORE_PATH: &str = "data/trade-ssm.db";
 
 const DEFAULT_QUANTITY: &str = "0.001";
 const MARK_TO_MARKET_INTERVAL_SECS: u64 = 10;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let mode = match env_or("EXECUTION_MODE", DEFAULT_EXECUTION_MODE).as_str() {
@@ -37,7 +36,24 @@ async fn main() -> Result<()> {
     let subscriber = Subscriber::new(nats_client.clone());
     let price_subscriber = Subscriber::new(nats_client);
 
-    let engine = Arc::new(Mutex::new(ExecutionEngine::new(mode)));
+    // Open SQLite store for position persistence and trade recording
+    let store_path = env_or("STORE_PATH", DEFAULT_STORE_PATH);
+    let store = Arc::new(TradeStore::open(&store_path)?);
+    tracing::info!(%store_path, "trade store opened");
+
+    let mut engine_inner = ExecutionEngine::new(mode).with_store(Arc::clone(&store));
+
+    // Recover positions from previous session
+    if let Err(e) = engine_inner.recover_positions() {
+        tracing::warn!(error = %e, "failed to recover positions from store");
+    } else {
+        let count = engine_inner.positions().all().len();
+        if count > 0 {
+            tracing::info!(count, "recovered open positions from store");
+        }
+    }
+
+    let engine = Arc::new(Mutex::new(engine_inner));
     let risk = Arc::new(Mutex::new(RiskManager::new(
         RiskConfig::default(),
         Decimal::from(10_000),
@@ -119,6 +135,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("waiting for signals");
 
+    tokio::select! {
+        _ = async {
     while let Some(signal) = sig_rx.recv().await {
         if signal.action == AIAction::Neutral {
             continue;
@@ -169,6 +187,17 @@ async fn main() -> Result<()> {
             }
         }
     }
+        } => {},
+        _ = shutdown_signal() => {},
+    }
 
+    tracing::info!("execution service shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
+    tracing::info!("shutdown signal received, exiting gracefully");
 }

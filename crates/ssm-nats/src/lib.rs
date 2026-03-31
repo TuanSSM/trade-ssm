@@ -12,16 +12,33 @@ pub use subscriber::Subscriber;
 /// Connect to a NATS server and return a client.
 ///
 /// Uses `NATS_URL` env var, defaulting to `nats://localhost:4222`.
+/// If `NATS_USER` and `NATS_PASS` env vars are set, authenticates with
+/// username/password credentials.
 pub async fn connect() -> Result<Client> {
     let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     connect_to(&url).await
 }
 
 /// Connect to a specific NATS server URL.
+///
+/// If `NATS_USER` and `NATS_PASS` env vars are set, authenticates with
+/// username/password credentials. Otherwise connects without auth.
 pub async fn connect_to(url: &str) -> Result<Client> {
-    let client = async_nats::connect(url)
-        .await
-        .with_context(|| format!("connecting to NATS at {url}"))?;
+    let user = std::env::var("NATS_USER").ok();
+    let pass = std::env::var("NATS_PASS").ok();
+
+    let client = match (user, pass) {
+        (Some(u), Some(p)) => {
+            let opts = async_nats::ConnectOptions::with_user_and_password(u, p);
+            opts.connect(url)
+                .await
+                .with_context(|| format!("connecting to NATS at {url} with credentials"))?
+        }
+        _ => async_nats::connect(url)
+            .await
+            .with_context(|| format!("connecting to NATS at {url}"))?,
+    };
+
     tracing::info!(%url, "connected to NATS");
     Ok(client)
 }

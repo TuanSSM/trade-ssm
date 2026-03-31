@@ -1,6 +1,6 @@
 [package]
-name = "ssm-execution"
-description = "Order management, position tracking, paper/live execution for trade-ssm"
+name = "ssm-store"
+description = "SQLite persistence layer for trade-ssm: positions, orders, trades, signals"
 version.workspace = true
 edition.workspace = true
 
@@ -12,9 +12,4 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-reqwest = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
-hex = "0.4"
-tokio = { workspace = true }
-ssm-store = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }

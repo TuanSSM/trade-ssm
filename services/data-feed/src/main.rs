@@ -7,11 +7,7 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
@@ -51,54 +47,68 @@ async fn main() -> Result<()> {
 
     tracing::info!("processing WebSocket events");
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            WsEvent::Trade(trade) => {
-                // Publish raw trade to NATS
-                if let Err(e) = publisher.publish(&trade_topic, &trade).await {
-                    tracing::warn!(error = %e, "failed to publish trade");
-                }
+    tokio::select! {
+        _ = async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    WsEvent::Trade(trade) => {
+                        // Publish raw trade to NATS
+                        if let Err(e) = publisher.publish(&trade_topic, &trade).await {
+                            tracing::warn!(error = %e, "failed to publish trade");
+                        }
 
-                // Feed into aggregator — may produce closed candle
-                if let Some(candle) = aggregator.ingest(&trade) {
-                    tracing::info!(
-                        open_time = candle.open_time,
-                        trades = candle.trades,
-                        "candle closed from aggregator"
-                    );
-                    if let Err(e) = publisher.publish(&candle_topic, &candle).await {
-                        tracing::warn!(error = %e, "failed to publish aggregated candle");
+                        // Feed into aggregator — may produce closed candle
+                        if let Some(candle) = aggregator.ingest(&trade) {
+                            tracing::info!(
+                                open_time = candle.open_time,
+                                trades = candle.trades,
+                                "candle closed from aggregator"
+                            );
+                            if let Err(e) = publisher.publish(&candle_topic, &candle).await {
+                                tracing::warn!(error = %e, "failed to publish aggregated candle");
+                            }
+                        }
+                    }
+                    WsEvent::Liquidation(liq) => {
+                        tracing::debug!(
+                            symbol = %liq.symbol,
+                            side = %liq.side,
+                            price = %liq.price,
+                            "liquidation event"
+                        );
+                        if let Err(e) = publisher.publish(&liq_topic, &liq).await {
+                            tracing::warn!(error = %e, "failed to publish liquidation");
+                        }
+                    }
+                    WsEvent::Kline(candle) => {
+                        // Kline events are closed candles from Binance directly
+                        tracing::info!(
+                            open_time = candle.open_time,
+                            close = %candle.close,
+                            "kline candle received"
+                        );
+                        let kline_topic = ssm_nats::topics::candles(&symbol, &format!("{interval}.kline"));
+                        if let Err(e) = publisher.publish(&kline_topic, &candle).await {
+                            tracing::warn!(error = %e, "failed to publish kline candle");
+                        }
                     }
                 }
             }
-            WsEvent::Liquidation(liq) => {
-                tracing::debug!(
-                    symbol = %liq.symbol,
-                    side = %liq.side,
-                    price = %liq.price,
-                    "liquidation event"
-                );
-                if let Err(e) = publisher.publish(&liq_topic, &liq).await {
-                    tracing::warn!(error = %e, "failed to publish liquidation");
-                }
-            }
-            WsEvent::Kline(candle) => {
-                // Kline events are closed candles from Binance directly
-                tracing::info!(
-                    open_time = candle.open_time,
-                    close = %candle.close,
-                    "kline candle received"
-                );
-                let kline_topic = ssm_nats::topics::candles(&symbol, &format!("{interval}.kline"));
-                if let Err(e) = publisher.publish(&kline_topic, &candle).await {
-                    tracing::warn!(error = %e, "failed to publish kline candle");
-                }
-            }
-        }
+        } => {
+            ws_handle.await.context("WebSocket task panicked")?;
+        },
+        _ = shutdown_signal() => {},
     }
 
-    ws_handle.await.context("WebSocket task panicked")?;
+    tracing::info!("data-feed shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
+    tracing::info!("shutdown signal received, exiting gracefully");
 }
 
 #[cfg(test)]

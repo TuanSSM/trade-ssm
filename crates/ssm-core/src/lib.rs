@@ -1,4 +1,5 @@
 pub mod config;
+pub mod logging;
 pub mod types;
 
 pub use config::{
@@ -6,4 +7,5 @@ pub use config::{
     DEFAULT_CVD_WINDOW, DEFAULT_DATADIR, DEFAULT_DOWNLOAD_DAYS, DEFAULT_EXECUTION_MODE,
     DEFAULT_INTERVAL, DEFAULT_MAX_CANDLES, DEFAULT_SYMBOL,
 };
+pub use logging::init_logging;
 pub use types::*;

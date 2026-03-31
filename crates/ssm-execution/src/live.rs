@@ -42,13 +42,28 @@ pub struct LiveEngine {
     base_delay: Duration,
 }
 
+/// Read a secret from env var or from a file path specified by `{VAR}_FILE`.
+/// Docker secrets convention: if `BINANCE_API_KEY_FILE` is set, read the file contents.
+fn read_secret(var_name: &str) -> Result<String> {
+    // Try direct env var first
+    if let Ok(val) = std::env::var(var_name) {
+        return Ok(val);
+    }
+    // Try _FILE variant
+    let file_var = format!("{var_name}_FILE");
+    if let Ok(path) = std::env::var(&file_var) {
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading secret from {path}"))?;
+        return Ok(contents.trim().to_string());
+    }
+    anyhow::bail!("{var_name} or {file_var} must be set")
+}
+
 impl LiveEngine {
     /// Create from environment variables.
     pub fn from_env() -> Result<Self> {
-        let api_key =
-            std::env::var("BINANCE_API_KEY").context("BINANCE_API_KEY env var required")?;
-        let secret_key =
-            std::env::var("BINANCE_SECRET_KEY").context("BINANCE_SECRET_KEY env var required")?;
+        let api_key = read_secret("BINANCE_API_KEY")?;
+        let secret_key = read_secret("BINANCE_SECRET_KEY")?;
 
         Ok(Self {
             api_key,
@@ -95,10 +110,8 @@ impl LiveEngine {
 
     /// Create from environment variables using the testnet endpoint.
     pub fn from_env_testnet() -> Result<Self> {
-        let api_key =
-            std::env::var("BINANCE_API_KEY").context("BINANCE_API_KEY env var required")?;
-        let secret_key =
-            std::env::var("BINANCE_SECRET_KEY").context("BINANCE_SECRET_KEY env var required")?;
+        let api_key = read_secret("BINANCE_API_KEY")?;
+        let secret_key = read_secret("BINANCE_SECRET_KEY")?;
 
         Ok(Self {
             api_key,
