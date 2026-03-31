@@ -29,8 +29,21 @@ impl Subscriber {
             .context("subscribing to NATS subject")?;
 
         while let Some(msg) = sub.next().await {
+            let traceparent = msg
+                .headers
+                .as_ref()
+                .and_then(|h| h.get("traceparent"))
+                .map(|v| v.to_string());
+
             match serde_json::from_slice::<T>(&msg.payload) {
                 Ok(value) => {
+                    if let Some(tp) = &traceparent {
+                        tracing::debug!(
+                            traceparent = %tp,
+                            subject = %msg.subject,
+                            "received NATS message with trace context"
+                        );
+                    }
                     if tx.send(value).await.is_err() {
                         tracing::debug!("receiver dropped, ending subscription");
                         break;

@@ -84,6 +84,181 @@ pub fn interval_to_ms(interval: &str) -> i64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TOML-based application configuration with hot-reload support
+// ---------------------------------------------------------------------------
+
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Top-level configuration for trade-ssm services.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub trading: TradingConfig,
+    #[serde(default)]
+    pub risk: RiskConfig,
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingConfig {
+    #[serde(default = "default_symbol_str")]
+    pub symbol: String,
+    #[serde(default = "default_interval_str")]
+    pub interval: String,
+    #[serde(default = "default_execution_mode_str")]
+    pub execution_mode: String,
+    #[serde(default = "default_quantity")]
+    pub quantity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskConfig {
+    #[serde(default = "default_max_drawdown")]
+    pub max_drawdown_pct: f64,
+    #[serde(default = "default_max_positions")]
+    pub max_open_positions: u32,
+    #[serde(default = "default_position_size_pct")]
+    pub position_size_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub min_profit_threshold: Option<String>,
+    #[serde(default)]
+    pub quiet_hours_start: Option<u32>,
+    #[serde(default)]
+    pub quiet_hours_end: Option<u32>,
+    #[serde(default = "default_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub format: String,
+}
+
+// Default value functions for serde
+fn default_symbol_str() -> String {
+    DEFAULT_SYMBOL.to_string()
+}
+fn default_interval_str() -> String {
+    DEFAULT_INTERVAL.to_string()
+}
+fn default_execution_mode_str() -> String {
+    DEFAULT_EXECUTION_MODE.to_string()
+}
+fn default_quantity() -> String {
+    "0.001".to_string()
+}
+fn default_max_drawdown() -> f64 {
+    10.0
+}
+fn default_max_positions() -> u32 {
+    3
+}
+fn default_position_size_pct() -> f64 {
+    2.0
+}
+fn default_cooldown() -> u64 {
+    60
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        toml::from_str("").expect("empty TOML must parse to defaults")
+    }
+}
+
+impl Default for TradingConfig {
+    fn default() -> Self {
+        Self {
+            symbol: default_symbol_str(),
+            interval: default_interval_str(),
+            execution_mode: default_execution_mode_str(),
+            quantity: default_quantity(),
+        }
+    }
+}
+
+impl Default for RiskConfig {
+    fn default() -> Self {
+        Self {
+            max_drawdown_pct: default_max_drawdown(),
+            max_open_positions: default_max_positions(),
+            position_size_pct: default_position_size_pct(),
+        }
+    }
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_profit_threshold: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cooldown_secs: default_cooldown(),
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            format: String::new(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// Load config from a TOML file. Falls back to defaults for missing fields.
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading config from {}: {e}", path.display()))?;
+        let config: Self =
+            toml::from_str(&content).map_err(|e| anyhow::anyhow!("parsing config TOML: {e}"))?;
+        Ok(config)
+    }
+
+    /// Load from the `CONFIG_FILE` env var path, or return defaults.
+    pub fn from_env_or_default() -> Self {
+        match std::env::var("CONFIG_FILE") {
+            Ok(path) => match Self::from_file(Path::new(&path)) {
+                Ok(config) => {
+                    tracing::info!(%path, "loaded config from file");
+                    config
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load config file, using defaults");
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Reload config from file (for hot-reload).
+    /// Returns the new config or an error if the file can't be parsed.
+    pub fn reload(path: &Path) -> anyhow::Result<Self> {
+        Self::from_file(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +299,61 @@ mod tests {
     fn test_env_parse_default() {
         let val: u64 = env_parse("__TRADE_SSM_TEST_NONEXISTENT__", 42);
         assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn default_config_has_sane_values() {
+        let config = AppConfig::default();
+        assert_eq!(config.trading.symbol, "BTCUSDT");
+        assert_eq!(config.trading.interval, "15m");
+        assert_eq!(config.trading.execution_mode, "paper");
+        assert_eq!(config.risk.max_open_positions, 3);
+    }
+
+    #[test]
+    fn parses_partial_toml() {
+        let toml_str = r#"
+[trading]
+symbol = "ETHUSDT"
+interval = "1h"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trading.symbol, "ETHUSDT");
+        assert_eq!(config.trading.interval, "1h");
+        // Defaults for unspecified fields
+        assert_eq!(config.trading.execution_mode, "paper");
+        assert_eq!(config.risk.max_open_positions, 3);
+    }
+
+    #[test]
+    fn parses_full_toml() {
+        let toml_str = r#"
+[trading]
+symbol = "SOLUSDT"
+interval = "5m"
+execution_mode = "live"
+quantity = "0.1"
+
+[risk]
+max_drawdown_pct = 5.0
+max_open_positions = 1
+position_size_pct = 1.0
+
+[notifications]
+enabled = true
+min_profit_threshold = "50"
+quiet_hours_start = 22
+quiet_hours_end = 6
+cooldown_secs = 120
+
+[logging]
+level = "debug"
+format = "json"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trading.symbol, "SOLUSDT");
+        assert_eq!(config.risk.max_drawdown_pct, 5.0);
+        assert!(config.notifications.enabled);
+        assert_eq!(config.notifications.quiet_hours_start, Some(22));
     }
 }

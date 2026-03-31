@@ -8,7 +8,31 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
 
-use crate::schema;
+use crate::migrations;
+
+/// A failed signal/message stored in the dead letter queue for retry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeadLetter {
+    pub id: i64,
+    pub timestamp: i64,
+    pub topic: String,
+    pub payload_json: String,
+    pub error: String,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub next_retry_at: Option<i64>,
+}
+
+/// A single audit log entry for a destructive or state-changing API operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub timestamp: i64,
+    pub action: String,
+    pub actor: String,
+    pub details: Option<String>,
+    pub ip_address: Option<String>,
+}
 
 /// SQLite-backed persistence for positions, orders, trades, and signals.
 ///
@@ -24,8 +48,7 @@ impl TradeStore {
             .with_context(|| format!("opening database: {}", path.as_ref().display()))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
             .context("setting pragmas")?;
-        conn.execute_batch(schema::CREATE_TABLES)
-            .context("creating tables")?;
+        migrations::run_migrations(&conn).context("running migrations")?;
         tracing::info!(path = %path.as_ref().display(), "trade store opened");
         Ok(Self {
             conn: Mutex::new(conn),
@@ -35,8 +58,7 @@ impl TradeStore {
     /// Open an in-memory database (for testing).
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("opening in-memory database")?;
-        conn.execute_batch(schema::CREATE_TABLES)
-            .context("creating tables")?;
+        migrations::run_migrations(&conn).context("running migrations")?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -370,6 +392,14 @@ impl TradeStore {
         Ok(Decimal::from_str(&sum).unwrap_or_default())
     }
 
+    /// Verify the database connection is alive by executing `SELECT 1`.
+    pub fn ping(&self) -> Result<()> {
+        let conn = self.conn.lock().expect("lock");
+        conn.query_row("SELECT 1", [], |_row| Ok(()))
+            .context("store ping failed")?;
+        Ok(())
+    }
+
     /// Win/loss counts.
     pub fn win_loss_counts(&self) -> Result<(usize, usize)> {
         let conn = self.conn.lock().expect("lock");
@@ -384,6 +414,138 @@ impl TradeStore {
             |row| row.get(0),
         )?;
         Ok((wins as usize, losses as usize))
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log
+    // -----------------------------------------------------------------------
+
+    /// Log an audit event for a destructive or state-changing operation.
+    pub fn log_audit(
+        &self,
+        action: &str,
+        actor: &str,
+        details: Option<&str>,
+        ip_address: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO audit_log (timestamp, action, actor, details, ip_address) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![now, action, actor, details, ip_address],
+        )?;
+        Ok(())
+    }
+
+    /// Load recent audit log entries.
+    pub fn load_audit_log(&self, limit: u32) -> Result<Vec<AuditEntry>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, action, actor, details, ip_address FROM audit_log ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+        let entries = stmt
+            .query_map(rusqlite::params![limit], |row| {
+                Ok(AuditEntry {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    action: row.get(2)?,
+                    actor: row.get(3)?,
+                    details: row.get(4)?,
+                    ip_address: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    // -----------------------------------------------------------------------
+    // Dead letter queue
+    // -----------------------------------------------------------------------
+
+    /// Save a failed signal/message to the dead letter queue.
+    pub fn save_dead_letter(
+        &self,
+        topic: &str,
+        payload_json: &str,
+        error: &str,
+        max_retries: u32,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        // Schedule first retry in 60 seconds
+        let next_retry = now + 60_000;
+        conn.execute(
+            "INSERT INTO dead_letters (timestamp, topic, payload_json, error, max_retries, next_retry_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![now, topic, payload_json, error, max_retries, next_retry],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Load dead letters that are due for retry.
+    pub fn load_retryable_dead_letters(&self, limit: u32) -> Result<Vec<DeadLetter>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, topic, payload_json, error, retry_count, max_retries, next_retry_at
+             FROM dead_letters
+             WHERE resolved = 0 AND retry_count < max_retries AND next_retry_at <= ?1
+             ORDER BY next_retry_at ASC LIMIT ?2",
+        )?;
+        let entries = stmt
+            .query_map(rusqlite::params![now, limit], |row| {
+                Ok(DeadLetter {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    topic: row.get(2)?,
+                    payload_json: row.get(3)?,
+                    error: row.get(4)?,
+                    retry_count: row.get(5)?,
+                    max_retries: row.get(6)?,
+                    next_retry_at: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entries)
+    }
+
+    /// Mark a dead letter as resolved (successfully retried or manually dismissed).
+    pub fn resolve_dead_letter(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        conn.execute(
+            "UPDATE dead_letters SET resolved = 1 WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Increment retry count and schedule next retry with exponential backoff.
+    pub fn increment_dead_letter_retry(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        // Exponential backoff: 1min, 2min, 4min, 8min...
+        let row: (u32,) = conn.query_row(
+            "SELECT retry_count FROM dead_letters WHERE id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?,)),
+        )?;
+        let next_delay_ms = 60_000i64 * 2i64.pow(row.0);
+        let next_retry = now + next_delay_ms;
+        conn.execute(
+            "UPDATE dead_letters SET retry_count = retry_count + 1, next_retry_at = ?1 WHERE id = ?2",
+            rusqlite::params![next_retry, id],
+        )?;
+        Ok(())
+    }
+
+    /// Count unresolved dead letters.
+    pub fn dead_letter_count(&self) -> Result<u32> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM dead_letters WHERE resolved = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 }
 
@@ -746,6 +908,43 @@ mod tests {
     }
 
     #[test]
+    fn ping_ok() {
+        let store = test_store();
+        store.ping().unwrap();
+    }
+
+    #[test]
+    fn audit_log_roundtrip_and_ordering() {
+        let store = test_store();
+
+        // Log two audit events
+        store
+            .log_audit("force_exit", "api", Some("BTCUSDT"), Some("192.168.1.1"))
+            .unwrap();
+        // Small delay isn't needed — timestamps from chrono::Utc::now() may be identical,
+        // but INSERT order guarantees id ordering; we also check newest-first by timestamp.
+        store
+            .log_audit("stop_bot", "api", None, Some("10.0.0.1"))
+            .unwrap();
+
+        let entries = store.load_audit_log(10).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Newest first (stop_bot was inserted second, so its timestamp >= force_exit)
+        assert!(entries[0].timestamp >= entries[1].timestamp);
+        assert_eq!(entries[0].action, "stop_bot");
+        assert_eq!(entries[1].action, "force_exit");
+        assert_eq!(entries[1].details.as_deref(), Some("BTCUSDT"));
+        assert_eq!(entries[1].ip_address.as_deref(), Some("192.168.1.1"));
+        assert!(entries[0].details.is_none());
+
+        // Limit works
+        let one = store.load_audit_log(1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].action, "stop_bot");
+    }
+
+    #[test]
     fn parse_helpers() {
         assert_eq!(parse_side("BUY"), Side::Buy);
         assert_eq!(parse_side("SELL"), Side::Sell);
@@ -756,5 +955,26 @@ mod tests {
             parse_exit_reason("CustomExit(\"my_reason\")"),
             ExitReason::CustomExit("my_reason".into())
         );
+    }
+
+    #[test]
+    fn dead_letter_roundtrip() {
+        let store = test_store();
+        let id = store
+            .save_dead_letter("signals.btcusdt", r#"{"action":"EnterLong"}"#, "timeout", 3)
+            .unwrap();
+        assert!(id > 0);
+
+        let count = store.dead_letter_count().unwrap();
+        assert_eq!(count, 1);
+
+        // Not yet due for retry (scheduled 60s from now)
+        let retryable = store.load_retryable_dead_letters(10).unwrap();
+        assert_eq!(retryable.len(), 0);
+
+        // Resolve it
+        store.resolve_dead_letter(id).unwrap();
+        let count = store.dead_letter_count().unwrap();
+        assert_eq!(count, 0);
     }
 }

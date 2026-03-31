@@ -18,3 +18,4 @@ sha2 = { workspace = true }
 hex = "0.4"
 tokio = { workspace = true }
 ssm-store = { workspace = true }
+zeroize = { workspace = true }

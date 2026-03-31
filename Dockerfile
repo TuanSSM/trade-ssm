@@ -18,7 +18,9 @@ RUN cargo build --release \
     --bin rl-trainer \
     --bin data-feed \
     --bin signal-service \
-    --bin execution-service
+    --bin execution-service \
+    --bin api-service \
+    --bin trade-ssm
 
 FROM debian:bookworm-slim
 
@@ -28,6 +30,8 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -r ssm && useradd -r -g ssm -s /sbin/nologin ssm
+
 COPY --from=builder /app/target/release/analyzer /usr/local/bin/analyzer
 COPY --from=builder /app/target/release/download-data /usr/local/bin/download-data
 COPY --from=builder /app/target/release/backtest /usr/local/bin/backtest
@@ -36,11 +40,12 @@ COPY --from=builder /app/target/release/rl-trainer /usr/local/bin/rl-trainer
 COPY --from=builder /app/target/release/data-feed /usr/local/bin/data-feed
 COPY --from=builder /app/target/release/signal-service /usr/local/bin/signal-service
 COPY --from=builder /app/target/release/execution-service /usr/local/bin/execution-service
+COPY --from=builder /app/target/release/api-service /usr/local/bin/api-service
+COPY --from=builder /app/target/release/trade-ssm /usr/local/bin/trade-ssm
 
-RUN mkdir -p /app/user_data
+RUN mkdir -p /app/user_data /app/data /app/models && chown -R ssm:ssm /app
 WORKDIR /app
 
 ENV RUST_LOG=info
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD test -f /proc/1/status || exit 1
+USER ssm

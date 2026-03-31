@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use ssm_core::{Order, OrderStatus};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 /// Account balance information from Binance.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -29,17 +31,75 @@ const BINANCE_TESTNET: &str = "https://testnet.binancefuture.com";
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_BASE_DELAY_MS: u64 = 500;
 
+/// Per-request timeout for order submission and queries.
+const REQUEST_TIMEOUT_SECS: u64 = 10;
+
+/// Default circuit breaker configuration.
+const DEFAULT_CB_THRESHOLD: u32 = 3;
+const DEFAULT_CB_COOLDOWN_SECS: u64 = 30;
+
+/// Circuit breaker to prevent cascading failures when Binance is unresponsive.
+///
+/// After `threshold` consecutive failures, the breaker opens and rejects all
+/// requests for the `cooldown` duration. It automatically closes (half-open)
+/// once the cooldown expires, allowing the next request through.
+#[derive(Debug)]
+struct CircuitBreaker {
+    consecutive_failures: u32,
+    threshold: u32,
+    cooldown: Duration,
+    last_failure: Option<Instant>,
+}
+
+impl CircuitBreaker {
+    /// Create a new circuit breaker with the given threshold and cooldown.
+    fn new(threshold: u32, cooldown: Duration) -> Self {
+        Self {
+            consecutive_failures: 0,
+            threshold,
+            cooldown,
+            last_failure: None,
+        }
+    }
+
+    /// Returns `true` if the circuit breaker is open (rejecting requests).
+    ///
+    /// The breaker is open when consecutive failures have reached the threshold
+    /// and the cooldown period has not yet elapsed since the last failure.
+    fn is_open(&self) -> bool {
+        if self.consecutive_failures < self.threshold {
+            return false;
+        }
+        match self.last_failure {
+            Some(last) => last.elapsed() < self.cooldown,
+            None => false,
+        }
+    }
+
+    /// Record a successful request, resetting the failure counter.
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// Record a failed request, incrementing the counter and updating the timestamp.
+    fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        self.last_failure = Some(Instant::now());
+    }
+}
+
 /// Live execution engine for Binance Futures.
 ///
 /// Uses signed API (HMAC-SHA256) for order placement.
 /// Requires `BINANCE_API_KEY` and `BINANCE_SECRET_KEY` environment variables.
 pub struct LiveEngine {
-    api_key: String,
-    secret_key: String,
+    api_key: Zeroizing<String>,
+    secret_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
     max_retries: u32,
     base_delay: Duration,
+    circuit_breaker: Mutex<CircuitBreaker>,
 }
 
 /// Read a secret from env var or from a file path specified by `{VAR}_FILE`.
@@ -59,11 +119,19 @@ fn read_secret(var_name: &str) -> Result<String> {
     anyhow::bail!("{var_name} or {file_var} must be set")
 }
 
+/// Create a default circuit breaker with standard configuration.
+fn default_circuit_breaker() -> Mutex<CircuitBreaker> {
+    Mutex::new(CircuitBreaker::new(
+        DEFAULT_CB_THRESHOLD,
+        Duration::from_secs(DEFAULT_CB_COOLDOWN_SECS),
+    ))
+}
+
 impl LiveEngine {
     /// Create from environment variables.
     pub fn from_env() -> Result<Self> {
-        let api_key = read_secret("BINANCE_API_KEY")?;
-        let secret_key = read_secret("BINANCE_SECRET_KEY")?;
+        let api_key = Zeroizing::new(read_secret("BINANCE_API_KEY")?);
+        let secret_key = Zeroizing::new(read_secret("BINANCE_SECRET_KEY")?);
 
         Ok(Self {
             api_key,
@@ -75,14 +143,15 @@ impl LiveEngine {
                 .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
+            circuit_breaker: default_circuit_breaker(),
         })
     }
 
     /// Create with explicit credentials (for testing).
     pub fn new(api_key: String, secret_key: String) -> Self {
         Self {
-            api_key,
-            secret_key,
+            api_key: Zeroizing::new(api_key),
+            secret_key: Zeroizing::new(secret_key),
             base_url: BINANCE_MAINNET.to_string(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -90,14 +159,15 @@ impl LiveEngine {
                 .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
+            circuit_breaker: default_circuit_breaker(),
         }
     }
 
     /// Create with testnet base URL.
     pub fn with_testnet(api_key: String, secret_key: String) -> Self {
         Self {
-            api_key,
-            secret_key,
+            api_key: Zeroizing::new(api_key),
+            secret_key: Zeroizing::new(secret_key),
             base_url: BINANCE_TESTNET.to_string(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -105,13 +175,14 @@ impl LiveEngine {
                 .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
+            circuit_breaker: default_circuit_breaker(),
         }
     }
 
     /// Create from environment variables using the testnet endpoint.
     pub fn from_env_testnet() -> Result<Self> {
-        let api_key = read_secret("BINANCE_API_KEY")?;
-        let secret_key = read_secret("BINANCE_SECRET_KEY")?;
+        let api_key = Zeroizing::new(read_secret("BINANCE_API_KEY")?);
+        let secret_key = Zeroizing::new(read_secret("BINANCE_SECRET_KEY")?);
 
         Ok(Self {
             api_key,
@@ -123,6 +194,7 @@ impl LiveEngine {
                 .unwrap_or_default(),
             max_retries: DEFAULT_MAX_RETRIES,
             base_delay: Duration::from_millis(DEFAULT_BASE_DELAY_MS),
+            circuit_breaker: default_circuit_breaker(),
         })
     }
 
@@ -131,8 +203,39 @@ impl LiveEngine {
         &self.base_url
     }
 
-    /// Submit an order to Binance Futures with retry logic.
+    /// Check if the circuit breaker is open (rejecting requests).
+    fn check_circuit_breaker(&self) -> Result<()> {
+        let cb = self.circuit_breaker.lock().unwrap();
+        if cb.is_open() {
+            tracing::warn!(
+                consecutive_failures = cb.consecutive_failures,
+                "circuit breaker open, rejecting request"
+            );
+            anyhow::bail!(
+                "circuit breaker open: exchange unavailable after {} consecutive failures",
+                cb.consecutive_failures
+            );
+        }
+        Ok(())
+    }
+
+    /// Record a successful exchange request in the circuit breaker.
+    fn record_cb_success(&self) {
+        let mut cb = self.circuit_breaker.lock().unwrap();
+        cb.record_success();
+    }
+
+    /// Record a failed exchange request in the circuit breaker.
+    fn record_cb_failure(&self) {
+        let mut cb = self.circuit_breaker.lock().unwrap();
+        cb.record_failure();
+    }
+
+    /// Submit an order to Binance Futures with retry logic, per-request timeout,
+    /// and circuit breaker protection.
     pub async fn submit_order(&self, order: &mut Order, _current_price: Decimal) -> Result<()> {
+        self.check_circuit_breaker()?;
+
         let timestamp = chrono::Utc::now().timestamp_millis();
 
         let mut params = vec![
@@ -168,18 +271,42 @@ impl LiveEngine {
         let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v1/order", self.base_url);
 
-        let resp = self
-            .retry(|| async {
+        let timeout_duration = Duration::from_secs(REQUEST_TIMEOUT_SECS);
+        let resp = match tokio::time::timeout(
+            timeout_duration,
+            self.retry(|| async {
                 self.client
                     .post(&url)
-                    .header("X-MBX-APIKEY", &self.api_key)
+                    .header("X-MBX-APIKEY", self.api_key.as_str())
                     .query(&params)
                     .query(&[("signature", &signature)])
                     .send()
                     .await
                     .context("submitting order to Binance")
-            })
-            .await?;
+            }),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(resp) => {
+                    self.record_cb_success();
+                    resp
+                }
+                Err(e) => {
+                    self.record_cb_failure();
+                    return Err(e);
+                }
+            },
+            Err(_) => {
+                self.record_cb_failure();
+                tracing::error!(
+                    order_id = %order.id,
+                    timeout_secs = REQUEST_TIMEOUT_SECS,
+                    "order submission timed out"
+                );
+                anyhow::bail!("order submission timed out after {}s", REQUEST_TIMEOUT_SECS);
+            }
+        };
 
         let status = resp.status();
         if status.is_success() {
@@ -253,7 +380,7 @@ impl LiveEngine {
             .retry(|| async {
                 self.client
                     .delete(&url)
-                    .header("X-MBX-APIKEY", &self.api_key)
+                    .header("X-MBX-APIKEY", self.api_key.as_str())
                     .query(&params)
                     .query(&[("signature", &signature)])
                     .send()
@@ -293,7 +420,7 @@ impl LiveEngine {
             .retry(|| async {
                 self.client
                     .get(&url)
-                    .header("X-MBX-APIKEY", &self.api_key)
+                    .header("X-MBX-APIKEY", self.api_key.as_str())
                     .query(&params)
                     .query(&[("signature", &signature)])
                     .send()
@@ -323,12 +450,15 @@ impl LiveEngine {
         Ok(status)
     }
 
-    /// Query order details including filled quantity from Binance.
+    /// Query order details including filled quantity from Binance, with per-request
+    /// timeout and circuit breaker protection.
     pub async fn query_order_detail(
         &self,
         symbol: &str,
         order_id: &str,
     ) -> Result<(OrderStatus, Decimal)> {
+        self.check_circuit_breaker()?;
+
         let timestamp = chrono::Utc::now().timestamp_millis();
         let params = [
             ("symbol", symbol.to_string()),
@@ -345,18 +475,45 @@ impl LiveEngine {
         let signature = self.sign(&query_string)?;
         let url = format!("{}/fapi/v1/order", self.base_url);
 
-        let resp = self
-            .retry(|| async {
+        let timeout_duration = Duration::from_secs(REQUEST_TIMEOUT_SECS);
+        let resp = match tokio::time::timeout(
+            timeout_duration,
+            self.retry(|| async {
                 self.client
                     .get(&url)
-                    .header("X-MBX-APIKEY", &self.api_key)
+                    .header("X-MBX-APIKEY", self.api_key.as_str())
                     .query(&params)
                     .query(&[("signature", &signature)])
                     .send()
                     .await
                     .context("querying order detail on Binance")
-            })
-            .await?;
+            }),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(resp) => {
+                    self.record_cb_success();
+                    resp
+                }
+                Err(e) => {
+                    self.record_cb_failure();
+                    return Err(e);
+                }
+            },
+            Err(_) => {
+                self.record_cb_failure();
+                tracing::error!(
+                    order_id,
+                    timeout_secs = REQUEST_TIMEOUT_SECS,
+                    "order detail query timed out"
+                );
+                anyhow::bail!(
+                    "order detail query timed out after {}s",
+                    REQUEST_TIMEOUT_SECS
+                );
+            }
+        };
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -401,7 +558,7 @@ impl LiveEngine {
             .retry(|| async {
                 self.client
                     .get(&url)
-                    .header("X-MBX-APIKEY", &self.api_key)
+                    .header("X-MBX-APIKEY", self.api_key.as_str())
                     .query(&[("timestamp", &timestamp.to_string())])
                     .query(&[("signature", &signature)])
                     .send()
@@ -451,7 +608,7 @@ impl LiveEngine {
             .retry(|| async {
                 self.client
                     .get(&url)
-                    .header("X-MBX-APIKEY", &self.api_key)
+                    .header("X-MBX-APIKEY", self.api_key.as_str())
                     .query(&[("timestamp", &timestamp.to_string())])
                     .query(&[("signature", &signature)])
                     .send()
@@ -545,6 +702,22 @@ impl LiveEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Helper to build a LiveEngine with custom retry settings for tests.
+    fn test_engine_with_retries(max_retries: u32, base_delay_ms: u64) -> LiveEngine {
+        LiveEngine {
+            api_key: Zeroizing::new("key".into()),
+            secret_key: Zeroizing::new("secret".into()),
+            base_url: BINANCE_MAINNET.into(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
+            max_retries,
+            base_delay: Duration::from_millis(base_delay_ms),
+            circuit_breaker: default_circuit_breaker(),
+        }
+    }
 
     #[test]
     fn sign_produces_hex() {
@@ -655,17 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_fails_after_max_retries() {
-        let engine = LiveEngine {
-            api_key: "key".into(),
-            secret_key: "secret".into(),
-            base_url: BINANCE_MAINNET.into(),
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
-            max_retries: 1,
-            base_delay: Duration::from_millis(1), // fast for testing
-        };
+        let engine = test_engine_with_retries(1, 1);
 
         let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count = attempt_count.clone();
@@ -687,17 +850,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_succeeds_on_second_attempt() {
-        let engine = LiveEngine {
-            api_key: "key".into(),
-            secret_key: "secret".into(),
-            base_url: BINANCE_MAINNET.into(),
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
-            max_retries: 3,
-            base_delay: Duration::from_millis(1),
-        };
+        let engine = test_engine_with_retries(3, 1);
 
         let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count = attempt_count.clone();
@@ -717,5 +870,101 @@ mod tests {
 
         assert_eq!(result.unwrap(), 42);
         assert_eq!(attempt_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    // --- Circuit breaker tests ---
+
+    #[test]
+    fn test_circuit_breaker_starts_closed() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_stays_closed_below_threshold() {
+        let mut cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        cb.record_failure();
+        assert!(!cb.is_open());
+        cb.record_failure();
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_threshold_failures() {
+        let mut cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert!(cb.is_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_resets_on_success() {
+        let mut cb = CircuitBreaker::new(3, Duration::from_secs(30));
+        cb.record_failure();
+        cb.record_failure();
+        // One more would open it, but success resets
+        cb.record_success();
+        assert_eq!(cb.consecutive_failures, 0);
+        assert!(!cb.is_open());
+
+        // After reset, need threshold failures again to open
+        cb.record_failure();
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_closes_after_cooldown() {
+        let mut cb = CircuitBreaker::new(3, Duration::from_millis(1));
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+
+        // Should be open immediately
+        assert!(cb.is_open());
+
+        // Wait for cooldown to expire
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Should be closed now (cooldown expired)
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_check_passes_when_closed() {
+        let engine = LiveEngine::new("key".into(), "secret".into());
+        assert!(engine.check_circuit_breaker().is_ok());
+    }
+
+    #[test]
+    fn test_circuit_breaker_check_fails_when_open() {
+        let engine = LiveEngine::new("key".into(), "secret".into());
+
+        // Trip the circuit breaker
+        for _ in 0..DEFAULT_CB_THRESHOLD {
+            engine.record_cb_failure();
+        }
+
+        let result = engine.check_circuit_breaker();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("circuit breaker open"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_success_resets_via_engine() {
+        let engine = LiveEngine::new("key".into(), "secret".into());
+
+        // Record some failures (not enough to trip)
+        engine.record_cb_failure();
+        engine.record_cb_failure();
+
+        // Success resets counter
+        engine.record_cb_success();
+
+        // Now need full threshold again
+        engine.record_cb_failure();
+        engine.record_cb_failure();
+        assert!(engine.check_circuit_breaker().is_ok());
     }
 }

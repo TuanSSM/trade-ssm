@@ -10,6 +10,9 @@ use tokio::sync::mpsc;
 async fn main() -> Result<()> {
     ssm_core::init_logging();
 
+    let metrics_port: u16 = env_or("METRICS_PORT", "9090").parse().unwrap_or(9090);
+    ssm_core::init_metrics(metrics_port);
+
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
     let strategy_mode = env_or("STRATEGY_MODE", "cvd");
@@ -70,6 +73,9 @@ async fn main() -> Result<()> {
         if candle_buffer.len() >= DEFAULT_CVD_WINDOW {
             match strategy.analyze(&candle_buffer) {
                 Ok(Some(signal)) => {
+                    let action_str = format!("{:?}", signal.action);
+                    metrics::counter!("ssm_signals_generated_total", "action" => action_str).increment(1);
+
                     tracing::info!(
                         action = ?signal.action,
                         confidence = signal.confidence,

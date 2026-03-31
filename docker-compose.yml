@@ -180,10 +180,15 @@ services:
   nats:
     image: nats:2-alpine
     container_name: trade-ssm-nats
-    command: ["--user", "ssm", "--pass", "ssm_nats_secret"]
+    command: ["-c", "/etc/nats/nats-server.conf"]
     profiles: ["rl", "deploy"]
     ports:
       - "4222:4222"
+    volumes:
+      - ./config/nats-server.conf:/etc/nats/nats-server.conf:ro
+    environment:
+      - NATS_USER=${NATS_USER:-ssm}
+      - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
 
 volumes:
   store-data:
