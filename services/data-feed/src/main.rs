@@ -9,6 +9,11 @@ use tokio::sync::mpsc;
 async fn main() -> Result<()> {
     ssm_core::init_logging();
 
+    let metrics_port: u16 = ssm_core::env_or("METRICS_PORT", "9090")
+        .parse()
+        .unwrap_or(9090);
+    ssm_core::init_metrics(metrics_port);
+
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
 
@@ -50,6 +55,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = async {
             while let Some(event) = rx.recv().await {
+                metrics::counter!("ssm_ws_messages_total").increment(1);
                 match event {
                     WsEvent::Trade(trade) => {
                         // Publish raw trade to NATS

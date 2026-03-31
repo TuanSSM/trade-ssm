@@ -1,0 +1,24 @@
+# trade-ssm default configuration
+# Override by setting CONFIG_FILE env var to point to your custom config.
+
+[trading]
+symbol = "BTCUSDT"
+interval = "15m"
+execution_mode = "paper"
+quantity = "0.001"
+
+[risk]
+max_drawdown_pct = 10.0
+max_open_positions = 3
+position_size_pct = 2.0
+
+[notifications]
+enabled = false
+# min_profit_threshold = "50"
+# quiet_hours_start = 22
+# quiet_hours_end = 6
+cooldown_secs = 60
+
+[logging]
+level = "info"
+# format = "json"

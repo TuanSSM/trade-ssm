@@ -20,6 +20,9 @@ const MARK_TO_MARKET_INTERVAL_SECS: u64 = 10;
 async fn main() -> Result<()> {
     ssm_core::init_logging();
 
+    let metrics_port: u16 = env_or("METRICS_PORT", "9090").parse().unwrap_or(9090);
+    ssm_core::init_metrics(metrics_port);
+
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let mode = match env_or("EXECUTION_MODE", DEFAULT_EXECUTION_MODE).as_str() {
         "live" => ExecutionMode::Live,
@@ -85,6 +88,7 @@ async fn main() -> Result<()> {
 
     // Subscribe to signals
     let signal_topic = ssm_nats::topics::signals(&symbol);
+    let signal_topic_for_dlq = signal_topic.clone();
     let (sig_tx, mut sig_rx) = mpsc::channel::<Signal>(1_000);
 
     tokio::spawn(async move {
@@ -92,6 +96,9 @@ async fn main() -> Result<()> {
             tracing::error!(error = %e, "signal subscription failed");
         }
     });
+
+    // Clone store for dead letter queue usage in signal processing loop
+    let store_for_dlq = Arc::clone(&store);
 
     let order_topic = ssm_nats::topics::orders(&symbol);
     let position_topic = ssm_nats::topics::positions(&symbol);
@@ -138,6 +145,8 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = async {
     while let Some(signal) = sig_rx.recv().await {
+        metrics::counter!("ssm_signals_received_total").increment(1);
+
         if signal.action == AIAction::Neutral {
             continue;
         }
@@ -164,6 +173,10 @@ async fn main() -> Result<()> {
 
         match eng.submit_signal(&signal, quantity, current_price) {
             Ok(order) => {
+                let side_str = format!("{}", order.side);
+                let status_str = format!("{:?}", order.status);
+                metrics::counter!("ssm_orders_total", "side" => side_str, "status" => status_str).increment(1);
+
                 tracing::info!(
                     order_id = %order.id,
                     side = %order.side,
@@ -175,7 +188,10 @@ async fn main() -> Result<()> {
                     tracing::warn!(error = %e, "failed to publish order");
                 }
 
-                // Publish position update
+                // Publish position update and track open positions
+                let open_count = eng.positions().all().len();
+                metrics::gauge!("ssm_open_positions").set(open_count as f64);
+
                 if let Some(pos) = eng.positions().get(&symbol) {
                     if let Err(e) = publisher.publish(&position_topic, pos).await {
                         tracing::warn!(error = %e, "failed to publish position");
@@ -183,7 +199,17 @@ async fn main() -> Result<()> {
                 }
             }
             Err(e) => {
+                metrics::counter!("ssm_orders_total", "side" => "unknown", "status" => "failed").increment(1);
                 tracing::warn!(error = %e, action = ?signal.action, "order submission failed");
+                let payload = serde_json::to_string(&signal).unwrap_or_default();
+                if let Err(dlq_err) = store_for_dlq.save_dead_letter(
+                    &signal_topic_for_dlq,
+                    &payload,
+                    &e.to_string(),
+                    3,
+                ) {
+                    tracing::error!(error = %dlq_err, "failed to save to dead letter queue");
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use rust_decimal::Decimal;
 use ssm_core::{Candle, Liquidation, Side, Trade};
 use std::str::FromStr;
@@ -83,7 +84,10 @@ impl BinanceWsClient {
                         return Err(e).context("max reconnect attempts exceeded");
                     }
 
-                    let delay = self.config.reconnect_base_ms * 2u64.pow(attempt.min(6));
+                    let base = self.config.reconnect_base_ms * 2u64.pow(attempt.min(6));
+                    let jitter = rand::thread_rng().gen_range(0..=base / 2);
+                    let delay = base + jitter;
+                    metrics::counter!("ssm_ws_reconnections_total").increment(1);
                     tracing::info!(delay_ms = delay, "reconnecting after backoff");
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
                 }

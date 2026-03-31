@@ -1,27 +1,79 @@
 use axum::{
-    extract::State,
+    extract::{
+        ws::{Message, WebSocket},
+        FromRequest, Request, State, WebSocketUpgrade,
+    },
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use governor::clock::DefaultClock;
+use governor::state::keyed::DefaultKeyedStateStore;
+use governor::{Quota, RateLimiter};
 use rust_decimal::Decimal;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use ssm_store::TradeStore;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tower::ServiceBuilder;
+use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{Any, CorsLayer};
+use validator::Validate;
+
+type KeyedRateLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>;
+
+// ---------------------------------------------------------------------------
+// Validated JSON extractor
+// ---------------------------------------------------------------------------
+
+struct ValidatedJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for ValidatedJson<T>
+where
+    T: DeserializeOwned + Validate,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state).await.map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+        value.validate().map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"errors": e.to_string()})),
+            )
+        })?;
+        Ok(ValidatedJson(value))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Response / request types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct HealthResponse {
-    healthy: bool,
-    version: String,
+struct LiveResponse {
+    live: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReadyResponse {
+    ready: bool,
+    checks: ReadyChecks,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReadyChecks {
+    store: String,
+    uptime_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +117,9 @@ struct MessageResponse {
     message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 struct ForceExitRequest {
+    #[validate(length(min = 1, max = 20))]
     symbol: String,
 }
 
@@ -83,6 +136,10 @@ struct AppState {
     realized_pnl: Decimal,
     balance: Decimal,
     store: Option<Arc<TradeStore>>,
+    event_tx: broadcast::Sender<String>,
+    app_config: ssm_core::AppConfig,
+    rate_limiter: Arc<KeyedRateLimiter>,
+    live_balance: Option<(Decimal, Decimal)>,
 }
 
 impl AppState {
@@ -114,6 +171,14 @@ impl AppState {
             .and_then(|s| s.total_realized_pnl().ok())
             .unwrap_or_default();
 
+        let (event_tx, _) = broadcast::channel(1000);
+
+        let app_config = ssm_core::AppConfig::from_env_or_default();
+
+        let rate_limiter = Arc::new(RateLimiter::keyed(Quota::per_minute(
+            NonZeroU32::new(100).unwrap(),
+        )));
+
         Self {
             start_time: std::time::Instant::now(),
             running: true,
@@ -123,11 +188,27 @@ impl AppState {
             realized_pnl,
             balance,
             store,
+            event_tx,
+            app_config,
+            rate_limiter,
+            live_balance: None,
         }
     }
 }
 
 type SharedState = Arc<RwLock<AppState>>;
+
+// ---------------------------------------------------------------------------
+// Metrics middleware
+// ---------------------------------------------------------------------------
+
+async fn track_metrics(request: Request, next: Next) -> impl IntoResponse {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    metrics::counter!("ssm_api_requests_total", "method" => method, "path" => path).increment(1);
+    response
+}
 
 // ---------------------------------------------------------------------------
 // Auth middleware
@@ -151,14 +232,66 @@ async fn api_key_auth(
 }
 
 // ---------------------------------------------------------------------------
+// Per-key rate limit middleware
+// ---------------------------------------------------------------------------
+
+async fn rate_limit_middleware(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+
+    let limiter = state.read().await.rate_limiter.clone();
+
+    match limiter.check_key(&key) {
+        Ok(()) => Ok(next.run(request).await),
+        Err(_) => Err(StatusCode::TOO_MANY_REQUESTS),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        healthy: true,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    })
+async fn health_live() -> Json<LiveResponse> {
+    Json(LiveResponse { live: true })
+}
+
+async fn health_ready(State(state): State<SharedState>) -> (StatusCode, Json<ReadyResponse>) {
+    let s = state.read().await;
+    let uptime_seconds = s.start_time.elapsed().as_secs();
+
+    let store_status = match &s.store {
+        Some(store) => match store.ping() {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("{e}"),
+        },
+        None => "unavailable".to_string(),
+    };
+
+    let ready = store_status == "ok";
+    let status_code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(ReadyResponse {
+            ready,
+            checks: ReadyChecks {
+                store: store_status,
+                uptime_seconds,
+            },
+        }),
+    )
 }
 
 async fn get_status(State(state): State<SharedState>) -> Json<StatusResponse> {
@@ -198,19 +331,44 @@ async fn get_profit(State(state): State<SharedState>) -> Json<ProfitResponse> {
 
 async fn get_balance(State(state): State<SharedState>) -> Json<BalanceResponse> {
     let s = state.read().await;
+    let (balance, available) = match s.live_balance {
+        Some((b, a)) => (b, a),
+        None => (s.balance, s.balance),
+    };
     Json(BalanceResponse {
-        balance: s.balance.to_string(),
-        available: s.balance.to_string(),
+        balance: balance.to_string(),
+        available: available.to_string(),
     })
+}
+
+fn extract_client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 async fn force_exit(
     State(state): State<SharedState>,
-    Json(req): Json<ForceExitRequest>,
-) -> Result<Json<MessageResponse>, StatusCode> {
+    headers: HeaderMap,
+    ValidatedJson(req): ValidatedJson<ForceExitRequest>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<serde_json::Value>)> {
     let mut s = state.write().await;
+    let ip = extract_client_ip(&headers);
     if s.positions.remove(&req.symbol).is_some() {
         tracing::info!(symbol = %req.symbol, "force-exited position");
+        let _ = s.event_tx.send(
+            serde_json::json!({
+                "type": "force_exited",
+                "symbol": req.symbol,
+                "timestamp": chrono::Utc::now().timestamp_millis()
+            })
+            .to_string(),
+        );
+        if let Some(ref store) = s.store {
+            let _ = store.log_audit("force_exit", "api", Some(&req.symbol), Some(&ip));
+        }
         Ok(Json(MessageResponse {
             message: format!("force-exited {}", req.symbol),
         }))
@@ -221,29 +379,68 @@ async fn force_exit(
     }
 }
 
-async fn start_bot(State(state): State<SharedState>) -> Json<MessageResponse> {
+async fn start_bot(State(state): State<SharedState>, headers: HeaderMap) -> Json<MessageResponse> {
     let mut s = state.write().await;
+    let ip = extract_client_ip(&headers);
     s.running = true;
     tracing::info!("bot started via API");
+    let _ = s.event_tx.send(
+        serde_json::json!({
+            "type": "bot_started",
+            "timestamp": chrono::Utc::now().timestamp_millis()
+        })
+        .to_string(),
+    );
+    if let Some(ref store) = s.store {
+        let _ = store.log_audit("start_bot", "api", None, Some(&ip));
+    }
     Json(MessageResponse {
         message: "bot started".to_string(),
     })
 }
 
-async fn stop_bot(State(state): State<SharedState>) -> Json<MessageResponse> {
+async fn stop_bot(State(state): State<SharedState>, headers: HeaderMap) -> Json<MessageResponse> {
     let mut s = state.write().await;
+    let ip = extract_client_ip(&headers);
     s.running = false;
     tracing::info!("bot stopped via API");
+    let _ = s.event_tx.send(
+        serde_json::json!({
+            "type": "bot_stopped",
+            "timestamp": chrono::Utc::now().timestamp_millis()
+        })
+        .to_string(),
+    );
+    if let Some(ref store) = s.store {
+        let _ = store.log_audit("stop_bot", "api", None, Some(&ip));
+    }
     Json(MessageResponse {
         message: "bot stopped".to_string(),
     })
 }
 
-async fn reload_config() -> Json<MessageResponse> {
-    tracing::info!("config reload requested (placeholder)");
-    Json(MessageResponse {
-        message: "config reload accepted".to_string(),
-    })
+async fn reload_config(State(state): State<SharedState>) -> impl IntoResponse {
+    let config_path =
+        std::env::var("CONFIG_FILE").unwrap_or_else(|_| "config/default.toml".to_string());
+    match ssm_core::AppConfig::reload(std::path::Path::new(&config_path)) {
+        Ok(new_config) => {
+            let mut s = state.write().await;
+            s.app_config = new_config.clone();
+            tracing::info!("config reloaded successfully");
+            let _ = s.event_tx.send(
+                serde_json::json!({
+                    "type": "config_reloaded",
+                    "timestamp": chrono::Utc::now().timestamp_millis()
+                })
+                .to_string(),
+            );
+            Json(serde_json::json!({ "status": "reloaded", "config": new_config }))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload failed");
+            Json(serde_json::json!({ "status": "error", "error": e.to_string() }))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +543,146 @@ async fn get_daily_performance(State(state): State<SharedState>) -> Json<DailyPe
     })
 }
 
+async fn get_audit_log(State(state): State<SharedState>) -> axum::response::Response {
+    let s = state.read().await;
+    if let Some(ref store) = s.store {
+        match store.load_audit_log(100) {
+            Ok(entries) => Json(serde_json::json!({ "entries": entries })).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        }
+    } else {
+        Json(serde_json::json!({ "entries": [] })).into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal injection + order listing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Validate)]
+struct InjectSignalRequest {
+    #[validate(length(min = 1, max = 20))]
+    symbol: String,
+    action: String,
+    confidence: Option<f64>,
+}
+
+async fn inject_signal(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    ValidatedJson(req): ValidatedJson<InjectSignalRequest>,
+) -> impl IntoResponse {
+    let action = match req.action.as_str() {
+        "enter_long" => "EnterLong",
+        "exit_long" => "ExitLong",
+        "enter_short" => "EnterShort",
+        "exit_short" => "ExitShort",
+        _ => "Neutral",
+    };
+
+    let event = serde_json::json!({
+        "type": "signal_injected",
+        "symbol": req.symbol,
+        "action": action,
+        "confidence": req.confidence.unwrap_or(1.0),
+        "timestamp": chrono::Utc::now().timestamp_millis()
+    });
+
+    let s = state.read().await;
+    let _ = s.event_tx.send(event.to_string());
+
+    if let Some(ref store) = s.store {
+        let ip = extract_client_ip(&headers);
+        let _ = store.log_audit(
+            "inject_signal",
+            "api",
+            Some(&format!("{} {}", req.symbol, action)),
+            Some(&ip),
+        );
+    }
+
+    Json(serde_json::json!({ "status": "signal_injected", "action": action }))
+}
+
+async fn list_orders(State(state): State<SharedState>) -> axum::response::Response {
+    let s = state.read().await;
+    if let Some(ref store) = s.store {
+        match store.load_orders_by_status(ssm_core::OrderStatus::Open) {
+            Ok(orders) => Json(serde_json::json!({ "orders": orders })).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        }
+    } else {
+        Json(serde_json::json!({ "orders": [] })).into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal balance update endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct BalanceUpdateRequest {
+    balance: String,
+    available: String,
+}
+
+async fn update_balance(
+    State(state): State<SharedState>,
+    Json(req): Json<BalanceUpdateRequest>,
+) -> impl IntoResponse {
+    match (
+        req.balance.parse::<Decimal>(),
+        req.available.parse::<Decimal>(),
+    ) {
+        (Ok(b), Ok(a)) => {
+            let mut s = state.write().await;
+            s.live_balance = Some((b, a));
+            Json(serde_json::json!({ "status": "ok" }))
+        }
+        _ => Json(serde_json::json!({ "status": "error", "error": "invalid decimal" })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket streaming
+// ---------------------------------------------------------------------------
+
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<SharedState>) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_ws_connection(socket, state))
+}
+
+async fn handle_ws_connection(mut socket: WebSocket, state: SharedState) {
+    let mut rx = state.read().await.event_tx.subscribe();
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Ok(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -355,18 +692,6 @@ fn build_router(state: SharedState, api_key: Option<String>) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-
-    // Rate limit: 100 requests per 60 seconds for API routes.
-    // HandleErrorLayer converts the fallible buffer/rate-limit error into a 503.
-    let rate_limit = ServiceBuilder::new()
-        .layer(axum::error_handling::HandleErrorLayer::new(
-            |_: tower::BoxError| async { StatusCode::SERVICE_UNAVAILABLE },
-        ))
-        .layer(tower::buffer::BufferLayer::new(128))
-        .layer(tower::limit::RateLimitLayer::new(
-            100,
-            std::time::Duration::from_secs(60),
-        ));
 
     let api = Router::new()
         .route("/api/v1/status", get(get_status))
@@ -380,14 +705,26 @@ fn build_router(state: SharedState, api_key: Option<String>) -> Router {
         .route("/api/v1/trades/history", get(get_trade_history))
         .route("/api/v1/performance", get(get_performance))
         .route("/api/v1/performance/daily", get(get_daily_performance))
+        .route("/api/v1/audit", get(get_audit_log))
+        .route("/api/v1/signals/inject", post(inject_signal))
+        .route("/api/v1/orders", get(list_orders))
+        .route("/api/v1/internal/balance", post(update_balance))
         .with_state(state.clone())
-        .layer(rate_limit)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
         .route_layer(middleware::from_fn_with_state(api_key, api_key_auth));
 
     Router::new()
-        .route("/health", get(health))
+        .route("/health", get(health_live))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
+        .route("/api/v1/ws", get(ws_handler))
+        .with_state(state.clone())
         .merge(api)
         .layer(cors)
+        .layer(middleware::from_fn(track_metrics))
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +734,12 @@ fn build_router(state: SharedState, api_key: Option<String>) -> Router {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     ssm_core::init_logging();
+
+    let metrics_port: u16 = std::env::var("METRICS_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9091);
+    ssm_core::init_metrics(metrics_port);
 
     let host = std::env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = std::env::var("API_PORT")
@@ -439,6 +782,7 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     fn test_state() -> SharedState {
+        let (event_tx, _) = broadcast::channel(16);
         Arc::new(RwLock::new(AppState {
             start_time: std::time::Instant::now(),
             running: true,
@@ -448,6 +792,12 @@ mod tests {
             realized_pnl: Decimal::ZERO,
             balance: Decimal::new(10000, 0),
             store: None,
+            event_tx,
+            app_config: ssm_core::AppConfig::default(),
+            rate_limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+                NonZeroU32::new(100).unwrap(),
+            ))),
+            live_balance: None,
         }))
     }
 
@@ -460,7 +810,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_health() {
+    async fn test_health_live() {
+        let app = test_router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let live: LiveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(live.live);
+    }
+
+    #[tokio::test]
+    async fn test_health_backward_compat() {
         let app = test_router(test_state());
         let resp = app
             .oneshot(
@@ -476,8 +847,72 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let health: HealthResponse = serde_json::from_slice(&body).unwrap();
-        assert!(health.healthy);
+        let live: LiveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(live.live);
+    }
+
+    #[tokio::test]
+    async fn test_health_ready_no_store() {
+        // Default test_state has store: None -> not ready
+        let app = test_router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ready: ReadyResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!ready.ready);
+        assert_eq!(ready.checks.store, "unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_health_ready_with_store() {
+        let store = TradeStore::open_memory().unwrap();
+        let (event_tx, _) = broadcast::channel(16);
+        let state: SharedState = Arc::new(RwLock::new(AppState {
+            start_time: std::time::Instant::now(),
+            running: true,
+            symbol: "BTCUSDT".to_string(),
+            mode: "paper".to_string(),
+            positions: HashMap::new(),
+            realized_pnl: Decimal::ZERO,
+            balance: Decimal::new(10000, 0),
+            store: Some(Arc::new(store)),
+            event_tx,
+            app_config: ssm_core::AppConfig::default(),
+            rate_limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+                NonZeroU32::new(100).unwrap(),
+            ))),
+            live_balance: None,
+        }));
+        let app = test_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ready: ReadyResponse = serde_json::from_slice(&body).unwrap();
+        assert!(ready.ready);
+        assert_eq!(ready.checks.store, "ok");
+        assert!(ready.checks.uptime_seconds < 5);
     }
 
     #[tokio::test]
@@ -702,6 +1137,57 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/reload_config")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_forceexit_empty_symbol_returns_422() {
+        let app = test_router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/forceexit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"symbol":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_forceexit_long_symbol_returns_422() {
+        let app = test_router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/forceexit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"symbol":"AAAAABBBBBCCCCCDDDDDE"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_forceexit_valid_symbol_passes_validation() {
+        let app = test_router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/forceexit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"symbol":"BTCUSDT"}"#))
                     .unwrap(),
             )
             .await
