@@ -1,6 +1,8 @@
 use anyhow::Result;
 use rust_decimal::Decimal;
 use ssm_core::{ExecutionMode, Order, OrderStatus, OrderType, Side, Signal};
+use ssm_store::TradeStore;
+use std::sync::Arc;
 
 use crate::error::ExecutionError;
 use crate::live::LiveEngine;
@@ -13,6 +15,7 @@ pub struct ExecutionEngine {
     paper: PaperEngine,
     positions: PositionTracker,
     live: Option<LiveEngine>,
+    store: Option<Arc<TradeStore>>,
 }
 
 impl ExecutionEngine {
@@ -23,6 +26,7 @@ impl ExecutionEngine {
             paper: PaperEngine::new(),
             positions: PositionTracker::new(),
             live: None,
+            store: None,
         }
     }
 
@@ -34,7 +38,43 @@ impl ExecutionEngine {
             paper: PaperEngine::new(),
             positions: PositionTracker::new(),
             live: Some(live),
+            store: None,
         }
+    }
+
+    /// Attach a persistent store for position/order/trade durability.
+    pub fn with_store(mut self, store: Arc<TradeStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Load persisted positions from the store (startup recovery).
+    pub fn recover_positions(&mut self) -> Result<usize> {
+        let store = match &self.store {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+        let positions = store.load_positions()?;
+        let count = positions.len();
+        for pos in positions {
+            tracing::info!(
+                symbol = %pos.symbol,
+                side = %pos.side,
+                qty = %pos.quantity,
+                entry = %pos.entry_price,
+                "recovered position from store"
+            );
+            self.positions.restore_position(pos);
+        }
+        if count > 0 {
+            tracing::info!(count, "positions recovered from persistent store");
+        }
+        Ok(count)
+    }
+
+    /// Access the store (if attached).
+    pub fn store(&self) -> Option<&Arc<TradeStore>> {
+        self.store.as_ref()
     }
 
     /// Create from environment: reads EXECUTION_MODE and, for live mode,
@@ -113,6 +153,7 @@ impl ExecutionEngine {
                 self.paper.fill_order(&mut order, current_price)?;
                 if order.status == OrderStatus::Filled {
                     self.positions.apply_fill(&order, current_price);
+                    self.persist_position_state(&order.symbol);
                 }
             }
             ExecutionMode::Live => {
@@ -121,6 +162,7 @@ impl ExecutionEngine {
                 tracing::warn!("live execution via sync path, order stays Pending — use submit_order_async for exchange execution");
             }
         }
+        self.persist_order(&order);
         Ok(order)
     }
 
@@ -140,6 +182,7 @@ impl ExecutionEngine {
                 self.paper.fill_order(&mut order, current_price)?;
                 if order.status == OrderStatus::Filled {
                     self.positions.apply_fill(&order, current_price);
+                    self.persist_position_state(&order.symbol);
                 }
             }
             ExecutionMode::Live => {
@@ -151,6 +194,7 @@ impl ExecutionEngine {
                     OrderStatus::Filled => {
                         let fill_price = order.price.unwrap_or(current_price);
                         self.positions.apply_fill(&order, fill_price);
+                        self.persist_position_state(&order.symbol);
                     }
                     OrderStatus::PartiallyFilled => {
                         // For partial fills, query the actual filled quantity
@@ -164,6 +208,7 @@ impl ExecutionEngine {
                             partial_order.quantity = filled_qty;
                             let fill_price = order.price.unwrap_or(current_price);
                             self.positions.apply_fill(&partial_order, fill_price);
+                            self.persist_position_state(&order.symbol);
                         }
                         order.status = status;
                     }
@@ -173,6 +218,7 @@ impl ExecutionEngine {
                 }
             }
         }
+        self.persist_order(&order);
         Ok(order)
     }
 
@@ -311,6 +357,33 @@ impl ExecutionEngine {
                 tracing::info!("preflight checks passed");
                 Ok(())
             }
+        }
+    }
+
+    /// Persist position state after a fill. Saves open positions, removes closed ones.
+    fn persist_position_state(&self, symbol: &str) {
+        let Some(store) = &self.store else { return };
+        // Save current position (if still open)
+        if let Some(pos) = self.positions.get(symbol) {
+            if let Err(e) = store.save_position(pos) {
+                tracing::error!(error = %e, symbol, "failed to persist position");
+            }
+        }
+        // Remove closed positions from store
+        for closed in self.positions.closed_symbols() {
+            if self.positions.get(closed).is_none() {
+                if let Err(e) = store.remove_position(closed) {
+                    tracing::error!(error = %e, symbol = closed, "failed to remove position from store");
+                }
+            }
+        }
+    }
+
+    /// Persist an order to the store.
+    fn persist_order(&self, order: &Order) {
+        let Some(store) = &self.store else { return };
+        if let Err(e) = store.save_order(order) {
+            tracing::error!(error = %e, order_id = %order.id, "failed to persist order");
         }
     }
 

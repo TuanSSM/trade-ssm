@@ -14,6 +14,7 @@ members = [
     "services/rl-backtest",
     "crates/ssm-nats",
     "crates/ssm-orderflow",
+    "crates/ssm-store",
     "services/data-feed",
     "services/signal",
     "services/execution",
@@ -50,7 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 toml = "1.0"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 futures-util = "0.3"
 async-nats = "0.46"
@@ -72,3 +73,5 @@ ssm-strategy = { path = "crates/ssm-strategy" }
 ssm-ai = { path = "crates/ssm-ai" }
 ssm-nats = { path = "crates/ssm-nats" }
 ssm-orderflow = { path = "crates/ssm-orderflow" }
+ssm-store = { path = "crates/ssm-store" }
+rusqlite = { version = "0.32", features = ["bundled"] }

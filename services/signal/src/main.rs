@@ -8,11 +8,7 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
@@ -60,6 +56,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("waiting for candle data");
 
+    tokio::select! {
+        _ = async {
     while let Some(candle) = rx.recv().await {
         candle_buffer.push(candle);
 
@@ -91,6 +89,17 @@ async fn main() -> Result<()> {
             }
         }
     }
+        } => {},
+        _ = shutdown_signal() => {},
+    }
 
+    tracing::info!("signal service shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
+    tracing::info!("shutdown signal received, exiting gracefully");
 }

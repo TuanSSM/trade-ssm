@@ -7,9 +7,11 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use ssm_store::TradeStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 
 // ---------------------------------------------------------------------------
@@ -80,6 +82,7 @@ struct AppState {
     positions: HashMap<String, TradeInfo>,
     realized_pnl: Decimal,
     balance: Decimal,
+    store: Option<Arc<TradeStore>>,
 }
 
 impl AppState {
@@ -91,14 +94,35 @@ impl AppState {
             .parse::<Decimal>()
             .unwrap_or_else(|_| Decimal::new(10000, 0));
 
+        // Open persistent store
+        let store_path =
+            std::env::var("STORE_PATH").unwrap_or_else(|_| "data/trade-ssm.db".to_string());
+        let store = match TradeStore::open(&store_path) {
+            Ok(s) => {
+                tracing::info!(path = %store_path, "persistent store opened");
+                Some(Arc::new(s))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to open store, running without persistence");
+                None
+            }
+        };
+
+        // Load realized PnL from store
+        let realized_pnl = store
+            .as_ref()
+            .and_then(|s| s.total_realized_pnl().ok())
+            .unwrap_or_default();
+
         Self {
             start_time: std::time::Instant::now(),
             running: true,
             symbol,
             mode,
             positions: HashMap::new(),
-            realized_pnl: Decimal::ZERO,
+            realized_pnl,
             balance,
+            store,
         }
     }
 }
@@ -223,6 +247,106 @@ async fn reload_config() -> Json<MessageResponse> {
 }
 
 // ---------------------------------------------------------------------------
+// Trade history & performance endpoints (powered by ssm-store)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TradeHistoryQuery {
+    from: Option<i64>,
+    to: Option<i64>,
+    symbol: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TradeHistoryResponse {
+    trades: Vec<TradeHistoryItem>,
+    total: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TradeHistoryItem {
+    id: String,
+    symbol: String,
+    side: String,
+    entry_price: String,
+    exit_price: String,
+    quantity: String,
+    profit: String,
+    profit_pct: String,
+    entry_time: i64,
+    exit_time: i64,
+    duration_candles: u64,
+    exit_reason: String,
+}
+
+async fn get_trade_history(
+    State(state): State<SharedState>,
+    axum::extract::Query(q): axum::extract::Query<TradeHistoryQuery>,
+) -> Json<TradeHistoryResponse> {
+    let s = state.read().await;
+    let Some(store) = &s.store else {
+        return Json(TradeHistoryResponse {
+            trades: vec![],
+            total: 0,
+        });
+    };
+
+    let trades = store
+        .load_trades(q.from, q.to, q.symbol.as_deref())
+        .unwrap_or_default();
+    let total = trades.len();
+    let items: Vec<TradeHistoryItem> = trades
+        .into_iter()
+        .map(|t| TradeHistoryItem {
+            id: t.id,
+            symbol: t.symbol,
+            side: format!("{}", t.side),
+            entry_price: t.entry_price.to_string(),
+            exit_price: t.exit_price.to_string(),
+            quantity: t.quantity.to_string(),
+            profit: t.profit.to_string(),
+            profit_pct: t.profit_pct.to_string(),
+            entry_time: t.entry_time,
+            exit_time: t.exit_time,
+            duration_candles: t.duration_candles,
+            exit_reason: format!("{:?}", t.exit_reason),
+        })
+        .collect();
+
+    Json(TradeHistoryResponse {
+        trades: items,
+        total,
+    })
+}
+
+async fn get_performance(State(state): State<SharedState>) -> Json<ssm_store::PerformanceSummary> {
+    let s = state.read().await;
+    let Some(store) = &s.store else {
+        return Json(ssm_store::summarize(&[]));
+    };
+
+    let trades = store.load_trades(None, None, None).unwrap_or_default();
+    Json(ssm_store::summarize(&trades))
+}
+
+#[derive(Debug, Serialize)]
+struct DailyPerfResponse {
+    days: Vec<ssm_store::analytics::DailyPerformance>,
+}
+
+async fn get_daily_performance(State(state): State<SharedState>) -> Json<DailyPerfResponse> {
+    let s = state.read().await;
+    let Some(store) = &s.store else {
+        return Json(DailyPerfResponse { days: vec![] });
+    };
+
+    let trades = store.load_trades(None, None, None).unwrap_or_default();
+    Json(DailyPerfResponse {
+        days: ssm_store::daily_performance(&trades),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
 
@@ -231,6 +355,18 @@ fn build_router(state: SharedState, api_key: Option<String>) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+
+    // Rate limit: 100 requests per 60 seconds for API routes.
+    // HandleErrorLayer converts the fallible buffer/rate-limit error into a 503.
+    let rate_limit = ServiceBuilder::new()
+        .layer(axum::error_handling::HandleErrorLayer::new(
+            |_: tower::BoxError| async { StatusCode::SERVICE_UNAVAILABLE },
+        ))
+        .layer(tower::buffer::BufferLayer::new(128))
+        .layer(tower::limit::RateLimitLayer::new(
+            100,
+            std::time::Duration::from_secs(60),
+        ));
 
     let api = Router::new()
         .route("/api/v1/status", get(get_status))
@@ -241,7 +377,11 @@ fn build_router(state: SharedState, api_key: Option<String>) -> Router {
         .route("/api/v1/start", post(start_bot))
         .route("/api/v1/stop", post(stop_bot))
         .route("/api/v1/reload_config", post(reload_config))
+        .route("/api/v1/trades/history", get(get_trade_history))
+        .route("/api/v1/performance", get(get_performance))
+        .route("/api/v1/performance/daily", get(get_daily_performance))
         .with_state(state.clone())
+        .layer(rate_limit)
         .route_layer(middleware::from_fn_with_state(api_key, api_key_auth));
 
     Router::new()
@@ -256,11 +396,7 @@ fn build_router(state: SharedState, api_key: Option<String>) -> Router {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let host = std::env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = std::env::var("API_PORT")
@@ -276,9 +412,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, "api-service starting");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
+    tracing::info!("api-service shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
+    tracing::info!("shutdown signal received, exiting gracefully");
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +447,7 @@ mod tests {
             positions: HashMap::new(),
             realized_pnl: Decimal::ZERO,
             balance: Decimal::new(10000, 0),
+            store: None,
         }))
     }
 

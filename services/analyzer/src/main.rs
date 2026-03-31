@@ -11,11 +11,7 @@ use ssm_notify::telegram::{format_report, TelegramBot};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let telegram = TelegramBot::from_env()?;
     let binance = BinanceClient::new();
@@ -33,13 +29,28 @@ async fn main() -> Result<()> {
         ))
         .await?;
 
-    loop {
-        if let Err(e) = run_cycle(&binance, &telegram, &symbol, &interval).await {
-            tracing::error!(error = %e, "cycle failed");
-            let _ = telegram.send_message(&format!("*error:* `{e}`")).await;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_secs(check_secs)).await;
+    tokio::select! {
+        _ = async {
+            loop {
+                if let Err(e) = run_cycle(&binance, &telegram, &symbol, &interval).await {
+                    tracing::error!(error = %e, "cycle failed");
+                    let _ = telegram.send_message(&format!("*error:* `{e}`")).await;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(check_secs)).await;
+            }
+        } => {},
+        _ = shutdown_signal() => {},
     }
+
+    tracing::info!("analyzer shut down");
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
+    tracing::info!("shutdown signal received, exiting gracefully");
 }
 
 async fn run_cycle(

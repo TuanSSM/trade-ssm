@@ -22,11 +22,7 @@ const LABEL_HORIZON: usize = 3;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    ssm_core::init_logging();
 
     let symbol = env_or("SYMBOL", DEFAULT_SYMBOL);
     let interval = env_or("INTERVAL", DEFAULT_INTERVAL);
@@ -77,6 +73,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("waiting for candle data to accumulate for training");
 
+    tokio::select! {
+        result = async {
     while let Some(candle) = rx.recv().await {
         candle_buffer.push(candle);
         candles_since_train += 1;
@@ -159,8 +157,20 @@ async fn main() -> Result<()> {
             candles_since_train = 0;
         }
     }
+    Ok::<(), anyhow::Error>(())
+        } => { result?; },
+        _ = shutdown_signal() => {},
+    }
 
+    tracing::info!("rl-trainer shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
+    tracing::info!("shutdown signal received, exiting gracefully");
 }
 
 /// Evaluate a trained model by running it through the RL environment.

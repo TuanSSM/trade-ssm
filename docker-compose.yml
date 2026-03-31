@@ -66,6 +66,8 @@ services:
       - MODEL_DIR=/app/models
       - LEARNING_RATE=${LEARNING_RATE:-0.01}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_USER=${NATS_USER:-ssm}
+      - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
     depends_on:
       - nats
       - data-feed
@@ -101,6 +103,8 @@ services:
       - SYMBOL=${SYMBOL:-BTCUSDT}
       - INTERVAL=${INTERVAL:-15m}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_USER=${NATS_USER:-ssm}
+      - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
     depends_on:
       - nats
 
@@ -121,6 +125,8 @@ services:
       - STRATEGY_MODE=${STRATEGY_MODE:-cvd}
       - MODEL_PATH=${MODEL_PATH:-/app/models/table_model_best.json}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_USER=${NATS_USER:-ssm}
+      - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
     depends_on:
       - nats
       - data-feed
@@ -133,20 +139,51 @@ services:
     container_name: trade-ssm-execution
     command: ["execution-service"]
     profiles: ["deploy"]
+    volumes:
+      - store-data:/app/data
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - SYMBOL=${SYMBOL:-BTCUSDT}
       - EXECUTION_MODE=${EXECUTION_MODE:-paper}
       - TRADE_QUANTITY=${TRADE_QUANTITY:-0.001}
+      - STORE_PATH=/app/data/trade-ssm.db
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_USER=${NATS_USER:-ssm}
+      - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
     depends_on:
       - nats
       - signal
+
+  # === API service: REST endpoints for monitoring ===
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-ssm-api
+    command: ["api-service"]
+    profiles: ["deploy"]
+    ports:
+      - "3000:3000"
+    volumes:
+      - store-data:/app/data
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - STORE_PATH=/app/data/trade-ssm.db
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_USER=${NATS_USER:-ssm}
+      - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
+    depends_on:
+      - nats
+      - execution
 
   # === NATS message broker ===
   nats:
     image: nats:2-alpine
     container_name: trade-ssm-nats
+    command: ["--user", "ssm", "--pass", "ssm_nats_secret"]
     profiles: ["rl", "deploy"]
     ports:
       - "4222:4222"
+
+volumes:
+  store-data:
