@@ -89,6 +89,17 @@ pub struct Liquidation {
     pub time: i64,
 }
 
+/// Funding rate snapshot from a futures exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingRate {
+    pub symbol: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub rate: Decimal,
+    pub timestamp: i64,
+    /// Next funding time (if available from exchange)
+    pub next_funding_time: Option<i64>,
+}
+
 /// Binance force order API response shape.
 #[derive(Debug, Deserialize)]
 pub struct ForceOrderResponse {

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use ssm_core::{Candle, Liquidation};
+use ssm_core::{Candle, FundingRate, Liquidation};
 
 use crate::binance::BinanceClient;
 use crate::bybit::BybitClient;
@@ -31,6 +31,9 @@ pub trait Exchange: Send + Sync {
 
     /// List available trading pairs.
     async fn list_pairs(&self) -> Result<Vec<PairInfo>>;
+
+    /// Fetch current funding rate for a symbol.
+    async fn fetch_funding_rate(&self, symbol: &str) -> Result<FundingRate>;
 
     /// Get supported timeframes for this exchange.
     fn supported_timeframes(&self) -> Vec<&str>;

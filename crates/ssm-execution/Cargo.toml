@@ -19,3 +19,11 @@ hex = "0.4"
 tokio = { workspace = true }
 ssm-store = { workspace = true }
 zeroize = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "backtest"
+harness = false

@@ -1,7 +1,8 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use ssm_core::Position;
+use ssm_core::{Position, Side};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Portfolio-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,7 @@ pub struct PortfolioManager {
     config: PortfolioConfig,
     positions: HashMap<String, Position>,
     pair_pnl: HashMap<String, Decimal>,
+    pair_close_times: HashMap<String, u64>,
 }
 
 impl PortfolioManager {
@@ -36,6 +38,7 @@ impl PortfolioManager {
             config,
             positions: HashMap::new(),
             pair_pnl: HashMap::new(),
+            pair_close_times: HashMap::new(),
         }
     }
 
@@ -135,6 +138,137 @@ impl PortfolioManager {
 
         count > 3
     }
+
+    /// Calculate equal-weight target exposure per symbol.
+    pub fn equal_weight_targets(&self) -> HashMap<String, Decimal> {
+        if self.positions.is_empty() {
+            return HashMap::new();
+        }
+        let total = self.total_exposure();
+        let count = Decimal::from(self.positions.len() as u64);
+        let target_each = if count > Decimal::ZERO {
+            total / count
+        } else {
+            Decimal::ZERO
+        };
+        self.positions
+            .keys()
+            .map(|s| (s.clone(), target_each))
+            .collect()
+    }
+
+    /// Calculate rebalance deltas: (symbol, side, quantity_delta) to reach targets.
+    pub fn rebalance_deltas(
+        &self,
+        targets: &HashMap<String, Decimal>,
+        current_prices: &HashMap<String, Decimal>,
+    ) -> Vec<(String, Side, Decimal)> {
+        let mut deltas = Vec::new();
+        for (symbol, &target_exposure) in targets {
+            let current_exposure = self.pair_exposure(symbol);
+            let price = current_prices.get(symbol).copied().unwrap_or(Decimal::ONE);
+            if price <= Decimal::ZERO {
+                continue;
+            }
+            let diff = target_exposure - current_exposure;
+            let qty = diff.abs() / price;
+            if qty > Decimal::ZERO {
+                let side = if diff > Decimal::ZERO {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                };
+                deltas.push((symbol.clone(), side, qty));
+            }
+        }
+        deltas
+    }
+
+    /// Dynamic position size multiplier based on portfolio drawdown.
+    pub fn drawdown_position_multiplier(
+        &self,
+        current_equity: Decimal,
+        peak_equity: Decimal,
+    ) -> Decimal {
+        if peak_equity <= Decimal::ZERO {
+            return Decimal::ONE;
+        }
+        let drawdown_pct = if current_equity < peak_equity {
+            (peak_equity - current_equity) / peak_equity * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+
+        if drawdown_pct < Decimal::from(5) {
+            Decimal::ONE
+        } else if drawdown_pct < Decimal::from(10) {
+            Decimal::new(75, 2) // 0.75
+        } else if drawdown_pct < Decimal::from(20) {
+            Decimal::new(50, 2) // 0.50
+        } else {
+            Decimal::new(25, 2) // 0.25
+        }
+    }
+
+    /// Get portfolio summary statistics.
+    pub fn summary(&self) -> PortfolioSummary {
+        let total_exposure = self.total_exposure();
+        let (largest_position, largest_exposure) = self
+            .positions
+            .iter()
+            .map(|(s, p)| (s.clone(), p.quantity * p.entry_price))
+            .max_by(|a, b| a.1.cmp(&b.1))
+            .unwrap_or_default();
+        let concentration_ratio = if total_exposure > Decimal::ZERO {
+            largest_exposure / total_exposure
+        } else {
+            Decimal::ZERO
+        };
+        PortfolioSummary {
+            total_exposure,
+            open_positions: self.positions.len(),
+            total_pnl: self.total_pnl(),
+            largest_position: if largest_position.is_empty() {
+                None
+            } else {
+                Some(largest_position)
+            },
+            largest_exposure,
+            concentration_ratio,
+        }
+    }
+
+    /// Record when a pair was last closed (for cooldown enforcement).
+    pub fn record_close(&mut self, symbol: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.pair_close_times.insert(symbol.to_string(), now);
+    }
+
+    /// Check if a pair is in cooldown (cannot reopen within cooldown_secs).
+    pub fn is_in_cooldown(&self, symbol: &str, cooldown_secs: u64) -> bool {
+        let Some(&close_time) = self.pair_close_times.get(symbol) else {
+            return false;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        now.saturating_sub(close_time) < cooldown_secs
+    }
+}
+
+/// Portfolio summary statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioSummary {
+    pub total_exposure: Decimal,
+    pub open_positions: usize,
+    pub total_pnl: Decimal,
+    pub largest_position: Option<String>,
+    pub largest_exposure: Decimal,
+    pub concentration_ratio: Decimal,
 }
 
 /// Extract the quote currency from a trading pair symbol.
@@ -342,5 +476,127 @@ mod tests {
         assert_eq!(extract_quote_currency("BNBUSDC"), "USDC");
         assert_eq!(extract_quote_currency("SOLETH"), "ETH");
         assert_eq!(extract_quote_currency("UNKNOWN"), "UNKNOWN");
+    }
+
+    #[test]
+    fn equal_weight_targets() {
+        let mut pm = PortfolioManager::new(PortfolioConfig::default());
+        pm.update_position(
+            "BTCUSDT",
+            Some(make_position("BTCUSDT", Side::Buy, 2, 50000)),
+        );
+        pm.update_position(
+            "ETHUSDT",
+            Some(make_position("ETHUSDT", Side::Buy, 10, 3000)),
+        );
+        // total = 100000 + 30000 = 130000, target_each = 65000
+        let targets = pm.equal_weight_targets();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(*targets.get("BTCUSDT").unwrap(), Decimal::from(65000));
+        assert_eq!(*targets.get("ETHUSDT").unwrap(), Decimal::from(65000));
+    }
+
+    #[test]
+    fn equal_weight_empty_portfolio() {
+        let pm = PortfolioManager::new(PortfolioConfig::default());
+        assert!(pm.equal_weight_targets().is_empty());
+    }
+
+    #[test]
+    fn rebalance_deltas_over_and_under_weight() {
+        let mut pm = PortfolioManager::new(PortfolioConfig::default());
+        pm.update_position(
+            "BTCUSDT",
+            Some(make_position("BTCUSDT", Side::Buy, 2, 50000)),
+        );
+        pm.update_position(
+            "ETHUSDT",
+            Some(make_position("ETHUSDT", Side::Buy, 10, 3000)),
+        );
+
+        let targets = pm.equal_weight_targets();
+        let mut prices = HashMap::new();
+        prices.insert("BTCUSDT".to_string(), Decimal::from(50000));
+        prices.insert("ETHUSDT".to_string(), Decimal::from(3000));
+
+        let deltas = pm.rebalance_deltas(&targets, &prices);
+        assert_eq!(deltas.len(), 2);
+        // BTC is overweight (100k vs 65k target) → sell
+        let btc = deltas.iter().find(|d| d.0 == "BTCUSDT").unwrap();
+        assert_eq!(btc.1, Side::Sell);
+        // ETH is underweight (30k vs 65k target) → buy
+        let eth = deltas.iter().find(|d| d.0 == "ETHUSDT").unwrap();
+        assert_eq!(eth.1, Side::Buy);
+    }
+
+    #[test]
+    fn drawdown_multiplier_tiers() {
+        let pm = PortfolioManager::new(PortfolioConfig::default());
+        let peak = Decimal::from(100_000);
+        // No drawdown
+        assert_eq!(pm.drawdown_position_multiplier(peak, peak), Decimal::ONE);
+        // 3% drawdown
+        assert_eq!(
+            pm.drawdown_position_multiplier(Decimal::from(97_000), peak),
+            Decimal::ONE
+        );
+        // 7% drawdown
+        assert_eq!(
+            pm.drawdown_position_multiplier(Decimal::from(93_000), peak),
+            Decimal::new(75, 2)
+        );
+        // 15% drawdown
+        assert_eq!(
+            pm.drawdown_position_multiplier(Decimal::from(85_000), peak),
+            Decimal::new(50, 2)
+        );
+        // 25% drawdown
+        assert_eq!(
+            pm.drawdown_position_multiplier(Decimal::from(75_000), peak),
+            Decimal::new(25, 2)
+        );
+    }
+
+    #[test]
+    fn portfolio_summary() {
+        let mut pm = PortfolioManager::new(PortfolioConfig::default());
+        pm.update_position(
+            "BTCUSDT",
+            Some(make_position("BTCUSDT", Side::Buy, 2, 50000)),
+        );
+        pm.update_position(
+            "ETHUSDT",
+            Some(make_position("ETHUSDT", Side::Sell, 10, 3000)),
+        );
+        pm.record_pnl("BTCUSDT", Decimal::from(500));
+
+        let s = pm.summary();
+        assert_eq!(s.open_positions, 2);
+        assert_eq!(s.total_exposure, Decimal::from(130_000));
+        assert_eq!(s.total_pnl, Decimal::from(500));
+        assert_eq!(s.largest_position, Some("BTCUSDT".to_string()));
+        assert_eq!(s.largest_exposure, Decimal::from(100_000));
+    }
+
+    #[test]
+    fn summary_empty_portfolio() {
+        let pm = PortfolioManager::new(PortfolioConfig::default());
+        let s = pm.summary();
+        assert_eq!(s.open_positions, 0);
+        assert_eq!(s.total_exposure, Decimal::ZERO);
+        assert!(s.largest_position.is_none());
+    }
+
+    #[test]
+    fn pair_cooldown() {
+        let mut pm = PortfolioManager::new(PortfolioConfig::default());
+        assert!(!pm.is_in_cooldown("BTCUSDT", 300));
+        pm.record_close("BTCUSDT");
+        // Just closed → should be in cooldown
+        assert!(pm.is_in_cooldown("BTCUSDT", 300));
+        // Zero cooldown → never in cooldown
+        assert!(!pm.is_in_cooldown("BTCUSDT", 0));
+        // Other symbol not in cooldown
+        assert!(!pm.is_in_cooldown("ETHUSDT", 300));
     }
 }

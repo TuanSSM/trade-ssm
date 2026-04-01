@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use ssm_core::{Candle, Liquidation};
+use ssm_core::{Candle, FundingRate, Liquidation};
 use std::str::FromStr;
 
 use crate::error::ExchangeError;
@@ -78,6 +78,39 @@ struct BybitResponse<T> {
 #[derive(serde::Deserialize)]
 struct KlineResult {
     list: Vec<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct InstrumentsResult {
+    list: Vec<InstrumentInfo>,
+}
+
+#[derive(serde::Deserialize)]
+struct InstrumentInfo {
+    symbol: String,
+    #[serde(rename = "baseCoin")]
+    base_coin: String,
+    #[serde(rename = "quoteCoin")]
+    quote_coin: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TickerResult {
+    list: Vec<TickerInfo>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct TickerInfo {
+    symbol: String,
+    #[serde(rename = "lastPrice", default)]
+    last_price: String,
+    #[serde(rename = "turnover24h", default)]
+    turnover_24h: String,
+    #[serde(rename = "fundingRate", default)]
+    funding_rate: String,
+    #[serde(rename = "nextFundingTime", default)]
+    next_funding_time: String,
 }
 
 /// Parse a Bybit kline entry: [startTime, open, high, low, close, volume, turnover]
@@ -251,8 +284,97 @@ impl Exchange for BybitClient {
     }
 
     async fn list_pairs(&self) -> Result<Vec<PairInfo>> {
-        // Stub: would call /v5/market/instruments-info
-        Err(ExchangeError::Unimplemented("list_pairs for Bybit".into()).into())
+        let url = format!("{}/v5/market/instruments-info", self.base_url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("category", "linear")])
+            .send()
+            .await
+            .context("Failed to fetch Bybit instruments")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
+        }
+
+        let body: BybitResponse<InstrumentsResult> = resp.json().await?;
+        if body.ret_code != 0 {
+            return Err(ExchangeError::ExchangeApiError {
+                code: body.ret_code,
+                message: body.ret_msg,
+            }
+            .into());
+        }
+
+        let pairs = body
+            .result
+            .list
+            .into_iter()
+            .map(|i| PairInfo {
+                symbol: i.symbol,
+                base: i.base_coin,
+                quote: i.quote_coin,
+                price: None,
+                volume_24h: None,
+            })
+            .collect();
+        Ok(pairs)
+    }
+
+    async fn fetch_funding_rate(&self, symbol: &str) -> Result<FundingRate> {
+        let url = format!("{}/v5/market/tickers", self.base_url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("category", "linear"), ("symbol", symbol)])
+            .send()
+            .await
+            .context("Failed to fetch Bybit funding rate")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
+        }
+
+        let body: BybitResponse<TickerResult> = resp.json().await?;
+        if body.ret_code != 0 {
+            return Err(ExchangeError::ExchangeApiError {
+                code: body.ret_code,
+                message: body.ret_msg,
+            }
+            .into());
+        }
+
+        let ticker = body
+            .result
+            .list
+            .into_iter()
+            .next()
+            .ok_or_else(|| ExchangeError::ParseError(format!("no ticker for {symbol}")))?;
+
+        let rate = Decimal::from_str(&ticker.funding_rate).unwrap_or(Decimal::ZERO);
+        let next_time = ticker.next_funding_time.parse::<i64>().ok();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        Ok(FundingRate {
+            symbol: symbol.to_string(),
+            rate,
+            timestamp: now,
+            next_funding_time: next_time,
+        })
     }
 
     fn supported_timeframes(&self) -> Vec<&str> {
@@ -344,5 +466,52 @@ mod tests {
         assert!(tf.contains(&"4h"));
         assert!(tf.contains(&"1d"));
         assert!(!tf.contains(&"1M")); // Monthly not in list
+    }
+
+    #[test]
+    fn test_parse_instrument_info() {
+        let json = r#"{"symbol":"BTCUSDT","baseCoin":"BTC","quoteCoin":"USDT"}"#;
+        let info: InstrumentInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.symbol, "BTCUSDT");
+        assert_eq!(info.base_coin, "BTC");
+        assert_eq!(info.quote_coin, "USDT");
+    }
+
+    #[test]
+    fn test_parse_ticker_info() {
+        let json = r#"{
+            "symbol":"BTCUSDT",
+            "lastPrice":"65000.50",
+            "turnover24h":"1500000000.00",
+            "fundingRate":"0.0001",
+            "nextFundingTime":"1700000000000"
+        }"#;
+        let info: TickerInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.symbol, "BTCUSDT");
+        assert_eq!(info.last_price, "65000.50");
+        assert_eq!(info.turnover_24h, "1500000000.00");
+        assert_eq!(info.funding_rate, "0.0001");
+        assert_eq!(info.next_funding_time, "1700000000000");
+    }
+
+    #[test]
+    fn test_parse_ticker_info_missing_fields() {
+        let json = r#"{"symbol":"ETHUSDT"}"#;
+        let info: TickerInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.symbol, "ETHUSDT");
+        assert_eq!(info.last_price, "");
+        assert_eq!(info.funding_rate, "");
+    }
+
+    #[test]
+    fn test_parse_instruments_result() {
+        let json = r#"{"list":[
+            {"symbol":"BTCUSDT","baseCoin":"BTC","quoteCoin":"USDT"},
+            {"symbol":"ETHUSDT","baseCoin":"ETH","quoteCoin":"USDT"}
+        ]}"#;
+        let result: InstrumentsResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.list.len(), 2);
+        assert_eq!(result.list[0].symbol, "BTCUSDT");
+        assert_eq!(result.list[1].base_coin, "ETH");
     }
 }

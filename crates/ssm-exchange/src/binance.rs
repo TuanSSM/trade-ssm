@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use ssm_core::{Candle, ForceOrderResponse, Liquidation};
+use ssm_core::{Candle, ForceOrderResponse, FundingRate, Liquidation};
 use std::str::FromStr;
 
 use crate::error::ExchangeError;
@@ -164,8 +164,76 @@ impl Exchange for BinanceClient {
     }
 
     async fn list_pairs(&self) -> Result<Vec<PairInfo>> {
-        // Stub: would call /fapi/v1/exchangeInfo
-        Err(ExchangeError::Unimplemented("list_pairs for Binance".into()).into())
+        let url = format!("{FUTURES_BASE}/fapi/v1/exchangeInfo");
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to fetch Binance exchange info")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        let symbols = body["symbols"]
+            .as_array()
+            .ok_or_else(|| ExchangeError::ParseError("missing symbols array".into()))?;
+
+        let pairs = symbols
+            .iter()
+            .filter_map(|s| {
+                Some(PairInfo {
+                    symbol: s["symbol"].as_str()?.to_string(),
+                    base: s["baseAsset"].as_str()?.to_string(),
+                    quote: s["quoteAsset"].as_str()?.to_string(),
+                    price: None,
+                    volume_24h: None,
+                })
+            })
+            .collect();
+        Ok(pairs)
+    }
+
+    async fn fetch_funding_rate(&self, symbol: &str) -> Result<FundingRate> {
+        let url = format!("{FUTURES_BASE}/fapi/v1/premiumIndex");
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("symbol", symbol)])
+            .send()
+            .await
+            .context("Failed to fetch Binance funding rate")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ExchangeError::ApiError {
+                status: status.to_string(),
+                body,
+            }
+            .into());
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        let rate_str = body["lastFundingRate"].as_str().unwrap_or("0");
+        let rate = Decimal::from_str(rate_str).unwrap_or(Decimal::ZERO);
+        let time = body["time"].as_i64().unwrap_or(0);
+        let next_time = body["nextFundingTime"].as_i64();
+
+        Ok(FundingRate {
+            symbol: symbol.to_string(),
+            rate,
+            timestamp: time,
+            next_funding_time: next_time,
+        })
     }
 
     fn supported_timeframes(&self) -> Vec<&str> {

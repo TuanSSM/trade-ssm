@@ -2,6 +2,8 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use ssm_core::{AIAction, Candle, ExitReason, Side, Signal, TradeRecord};
 
+use crate::slippage::SlippageModel;
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -16,6 +18,9 @@ pub struct BacktestConfig {
     pub funding_rate: Decimal,
     /// Fraction of balance to risk per trade, e.g. 0.10 = 10%.
     pub position_size_pct: Decimal,
+    /// Slippage model applied to fill prices.
+    #[serde(skip)]
+    pub slippage: SlippageModel,
 }
 
 impl Default for BacktestConfig {
@@ -26,6 +31,7 @@ impl Default for BacktestConfig {
             leverage: 1,
             funding_rate: Decimal::new(1, 4),       // 0.01%
             position_size_pct: Decimal::new(10, 2), // 10%
+            slippage: SlippageModel::default(),
         }
     }
 }
@@ -152,8 +158,14 @@ impl BacktestEngine {
                 match sig.action {
                     // Enter long: only if flat
                     AIAction::EnterLong if position.is_none() => {
-                        let exec_price = forming.close; // approximate fill at candle close
+                        let raw_price = forming.close;
                         let notional = balance * cfg.position_size_pct;
+                        let exec_price = cfg.slippage.apply(
+                            raw_price,
+                            Side::Buy,
+                            Some(notional * Decimal::from(cfg.leverage)),
+                            Some(forming.volume),
+                        );
                         let qty = (notional * Decimal::from(cfg.leverage)) / exec_price;
                         if qty > Decimal::ZERO {
                             let entry_fee = notional * Decimal::from(cfg.leverage) * cfg.fee_rate;
@@ -170,8 +182,14 @@ impl BacktestEngine {
                     }
                     // Enter short: only if flat
                     AIAction::EnterShort if position.is_none() => {
-                        let exec_price = forming.close;
+                        let raw_price = forming.close;
                         let notional = balance * cfg.position_size_pct;
+                        let exec_price = cfg.slippage.apply(
+                            raw_price,
+                            Side::Sell,
+                            Some(notional * Decimal::from(cfg.leverage)),
+                            Some(forming.volume),
+                        );
                         let qty = (notional * Decimal::from(cfg.leverage)) / exec_price;
                         if qty > Decimal::ZERO {
                             let entry_fee = notional * Decimal::from(cfg.leverage) * cfg.fee_rate;
@@ -190,7 +208,12 @@ impl BacktestEngine {
                     AIAction::ExitLong => {
                         if let Some(ref pos) = position {
                             if pos.side == Side::Buy {
-                                let exec_price = forming.close;
+                                let exec_price = cfg.slippage.apply(
+                                    forming.close,
+                                    Side::Sell,
+                                    Some(pos.quantity * forming.close),
+                                    Some(forming.volume),
+                                );
                                 let record = Self::close_position(
                                     pos,
                                     exec_price,
@@ -210,7 +233,12 @@ impl BacktestEngine {
                     AIAction::ExitShort => {
                         if let Some(ref pos) = position {
                             if pos.side == Side::Sell {
-                                let exec_price = forming.close;
+                                let exec_price = cfg.slippage.apply(
+                                    forming.close,
+                                    Side::Buy,
+                                    Some(pos.quantity * forming.close),
+                                    Some(forming.volume),
+                                );
                                 let record = Self::close_position(
                                     pos,
                                     exec_price,
@@ -538,6 +566,7 @@ mod tests {
             leverage: 1,
             funding_rate: Decimal::ZERO,
             position_size_pct: Decimal::new(10, 2), // 10%
+            slippage: SlippageModel::default(),
         }
     }
 
@@ -952,5 +981,44 @@ mod tests {
 
         // All winners => profit_factor = 999 (sentinel)
         assert_eq!(result.profit_factor, Decimal::from(999));
+    }
+
+    // -----------------------------------------------------------------------
+    // Slippage reduces profitability
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_slippage_reduces_profit() {
+        let candles = vec![
+            make_candle(100, 0),
+            make_candle(100, 1),
+            make_candle(110, 2),
+        ];
+        let signal_fn = |closed: &[Candle]| -> Option<Signal> {
+            if closed.len() == 1 {
+                Some(default_signal(AIAction::EnterLong))
+            } else if closed.len() == 2 {
+                Some(default_signal(AIAction::ExitLong))
+            } else {
+                None
+            }
+        };
+
+        // Without slippage
+        let mut no_slip = BacktestEngine::new(zero_fee_config());
+        let r1 = no_slip.run(&candles, signal_fn);
+
+        // With 50 bps slippage
+        let mut slip_cfg = zero_fee_config();
+        slip_cfg.slippage = SlippageModel::FixedBps(Decimal::from(50));
+        let mut with_slip = BacktestEngine::new(slip_cfg);
+        let r2 = with_slip.run(&candles, signal_fn);
+
+        // Slippage should reduce final balance
+        assert!(
+            r2.final_balance < r1.final_balance,
+            "slippage should reduce profit: {} < {}",
+            r2.final_balance,
+            r1.final_balance
+        );
     }
 }
