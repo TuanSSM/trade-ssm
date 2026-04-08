@@ -2,6 +2,8 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use ssm_core::{AIAction, Candle, ExitReason, Side, Signal, TradeRecord};
 
+use crate::risk::{kelly_fraction, KellyStats, SizingMode};
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -16,6 +18,10 @@ pub struct BacktestConfig {
     pub funding_rate: Decimal,
     /// Fraction of balance to risk per trade, e.g. 0.10 = 10%.
     pub position_size_pct: Decimal,
+    /// Optional dynamic sizing mode. When `Some`, overrides `position_size_pct`.
+    /// `None` preserves the existing fixed-percentage behavior.
+    #[serde(default)]
+    pub sizing_mode: Option<SizingMode>,
 }
 
 impl Default for BacktestConfig {
@@ -26,6 +32,7 @@ impl Default for BacktestConfig {
             leverage: 1,
             funding_rate: Decimal::new(1, 4),       // 0.01%
             position_size_pct: Decimal::new(10, 2), // 10%
+            sizing_mode: None,
         }
     }
 }
@@ -68,6 +75,44 @@ struct OpenPosition {
     entry_candle_idx: usize,
     entry_time: i64,
     total_funding_fee: Decimal,
+}
+
+// ---------------------------------------------------------------------------
+// Sizing helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the notional amount to risk for a new trade entry.
+///
+/// When `sizing_mode` is `None`, falls back to `position_size_pct`.
+fn compute_notional(
+    sizing_mode: &Option<SizingMode>,
+    position_size_pct: Decimal,
+    balance: Decimal,
+    trades: &[TradeRecord],
+) -> Decimal {
+    match sizing_mode {
+        None => balance * position_size_pct,
+        Some(SizingMode::Fixed { fraction }) => balance * fraction,
+        Some(SizingMode::Kelly {
+            fraction_multiplier,
+            min_trades,
+            fallback_fraction,
+            max_fraction,
+        }) => {
+            let stats = KellyStats::from_trades(trades);
+            if stats.total_trades < *min_trades {
+                balance * fallback_fraction
+            } else {
+                let raw = kelly_fraction(&stats);
+                if raw <= Decimal::ZERO {
+                    Decimal::ZERO
+                } else {
+                    let frac = (raw * fraction_multiplier).min(*max_fraction);
+                    balance * frac
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +198,12 @@ impl BacktestEngine {
                     // Enter long: only if flat
                     AIAction::EnterLong if position.is_none() => {
                         let exec_price = forming.close; // approximate fill at candle close
-                        let notional = balance * cfg.position_size_pct;
+                        let notional = compute_notional(
+                            &cfg.sizing_mode,
+                            cfg.position_size_pct,
+                            balance,
+                            &trades,
+                        );
                         let qty = (notional * Decimal::from(cfg.leverage)) / exec_price;
                         if qty > Decimal::ZERO {
                             let entry_fee = notional * Decimal::from(cfg.leverage) * cfg.fee_rate;
@@ -171,7 +221,12 @@ impl BacktestEngine {
                     // Enter short: only if flat
                     AIAction::EnterShort if position.is_none() => {
                         let exec_price = forming.close;
-                        let notional = balance * cfg.position_size_pct;
+                        let notional = compute_notional(
+                            &cfg.sizing_mode,
+                            cfg.position_size_pct,
+                            balance,
+                            &trades,
+                        );
                         let qty = (notional * Decimal::from(cfg.leverage)) / exec_price;
                         if qty > Decimal::ZERO {
                             let entry_fee = notional * Decimal::from(cfg.leverage) * cfg.fee_rate;
@@ -538,6 +593,7 @@ mod tests {
             leverage: 1,
             funding_rate: Decimal::ZERO,
             position_size_pct: Decimal::new(10, 2), // 10%
+            sizing_mode: None,
         }
     }
 
@@ -952,5 +1008,166 @@ mod tests {
 
         // All winners => profit_factor = 999 (sentinel)
         assert_eq!(result.profit_factor, Decimal::from(999));
+    }
+
+    // -----------------------------------------------------------------------
+    // Kelly sizing in backtest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kelly_sizing_mode_fixed_matches_position_size_pct() {
+        // SizingMode::Fixed with same fraction should produce identical results
+        // to the default position_size_pct path.
+        let candles = vec![
+            make_candle(100, 0),
+            make_candle(100, 1),
+            make_candle(110, 2),
+        ];
+
+        // Run with position_size_pct
+        let mut engine1 = BacktestEngine::new(zero_fee_config());
+        let r1 = engine1.run(&candles, |closed| {
+            if closed.len() == 1 {
+                Some(default_signal(AIAction::EnterLong))
+            } else if closed.len() == 2 {
+                Some(default_signal(AIAction::ExitLong))
+            } else {
+                None
+            }
+        });
+
+        // Run with SizingMode::Fixed at same 10%
+        let mut cfg2 = zero_fee_config();
+        cfg2.sizing_mode = Some(SizingMode::Fixed {
+            fraction: Decimal::new(10, 2),
+        });
+        let mut engine2 = BacktestEngine::new(cfg2);
+        let r2 = engine2.run(&candles, |closed| {
+            if closed.len() == 1 {
+                Some(default_signal(AIAction::EnterLong))
+            } else if closed.len() == 2 {
+                Some(default_signal(AIAction::ExitLong))
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(r1.total_trades, r2.total_trades);
+        assert_eq!(r1.trades[0].profit, r2.trades[0].profit);
+        assert_eq!(r1.final_balance, r2.final_balance);
+    }
+
+    #[test]
+    fn test_kelly_sizing_below_min_trades_uses_fallback() {
+        // min_trades=5, only 1 trade possible => uses fallback_fraction=5%
+        let candles = vec![
+            make_candle(100, 0),
+            make_candle(100, 1),
+            make_candle(110, 2),
+        ];
+
+        let mut cfg = zero_fee_config();
+        cfg.sizing_mode = Some(SizingMode::Kelly {
+            fraction_multiplier: Decimal::ONE,
+            min_trades: 5,
+            fallback_fraction: Decimal::new(5, 2), // 5%
+            max_fraction: Decimal::new(50, 2),
+        });
+        let mut engine = BacktestEngine::new(cfg);
+
+        let result = engine.run(&candles, |closed| {
+            if closed.len() == 1 {
+                Some(default_signal(AIAction::EnterLong))
+            } else if closed.len() == 2 {
+                Some(default_signal(AIAction::ExitLong))
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(result.total_trades, 1);
+        // With 5% of 10000 = 500 notional, qty = 500/100 = 5
+        // profit = (110-100) * 5 = 50
+        assert_eq!(result.trades[0].profit, Decimal::from(50));
+    }
+
+    #[test]
+    fn test_kelly_sizing_rolling_adapts_position_size() {
+        // Multiple trades — Kelly sizing should adapt after min_trades reached.
+        // Set min_trades=1 so Kelly kicks in from trade 2 onward.
+        let candles = vec![
+            make_candle(100, 0),
+            make_candle(100, 1),
+            make_candle(110, 2), // trade 1: +10% on entry, win
+            make_candle(110, 3),
+            make_candle(121, 4), // trade 2: +10% on entry, win (Kelly uses trade 1 stats)
+        ];
+
+        let mut cfg = zero_fee_config();
+        cfg.sizing_mode = Some(SizingMode::Kelly {
+            fraction_multiplier: Decimal::new(5, 1), // half-Kelly
+            min_trades: 1,
+            fallback_fraction: Decimal::new(10, 2), // 10%
+            max_fraction: Decimal::new(50, 2),      // 50%
+        });
+        let mut engine = BacktestEngine::new(cfg);
+
+        let result = engine.run(&candles, |closed| match closed.len() {
+            1 => Some(default_signal(AIAction::EnterLong)),
+            2 => Some(default_signal(AIAction::ExitLong)),
+            3 => Some(default_signal(AIAction::EnterLong)),
+            4 => Some(default_signal(AIAction::ExitLong)),
+            _ => None,
+        });
+
+        assert_eq!(result.total_trades, 2);
+        // Trade 1: 0 completed trades < min_trades=1, uses fallback 10%
+        // Trade 2: 1 completed trade (win_rate=1.0, all wins), Kelly fraction is high
+        // The second trade should use a different (larger) position size
+        // since Kelly with 100% win rate gives a high fraction
+        let trade1_qty = result.trades[0].quantity;
+        let trade2_qty = result.trades[1].quantity;
+        // After one winning trade, Kelly should size bigger than the fallback
+        assert!(
+            trade2_qty > trade1_qty,
+            "Kelly should increase sizing after a win: trade1_qty={trade1_qty}, trade2_qty={trade2_qty}"
+        );
+    }
+
+    #[test]
+    fn test_kelly_sizing_negative_edge_skips_entry() {
+        // After several losing trades, Kelly should compute negative edge and skip entries.
+        let candles = vec![
+            make_candle(100, 0),
+            make_candle(100, 1),
+            make_candle(90, 2), // trade 1: loss
+            make_candle(90, 3),
+            make_candle(80, 4), // trade 2: loss
+            make_candle(80, 5),
+            make_candle(70, 6), // trade 3 would be attempted but Kelly should skip
+        ];
+
+        let mut cfg = zero_fee_config();
+        cfg.sizing_mode = Some(SizingMode::Kelly {
+            fraction_multiplier: Decimal::ONE,
+            min_trades: 2, // Kelly kicks in after 2 trades
+            fallback_fraction: Decimal::new(10, 2),
+            max_fraction: Decimal::new(50, 2),
+        });
+        let mut engine = BacktestEngine::new(cfg);
+
+        let result = engine.run(&candles, |closed| match closed.len() {
+            1 => Some(default_signal(AIAction::EnterLong)),
+            2 => Some(default_signal(AIAction::ExitLong)),
+            3 => Some(default_signal(AIAction::EnterLong)),
+            4 => Some(default_signal(AIAction::ExitLong)),
+            5 => Some(default_signal(AIAction::EnterLong)), // should be skipped by Kelly
+            6 => Some(default_signal(AIAction::ExitLong)),
+            _ => None,
+        });
+
+        // First 2 trades use fallback (< min_trades), trade 3 should be skipped
+        // because Kelly sees 0% win rate => negative edge => zero notional
+        assert_eq!(result.total_trades, 2);
     }
 }
