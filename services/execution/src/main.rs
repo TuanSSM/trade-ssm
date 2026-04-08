@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use ssm_core::{
-    env_or, AIAction, ExecutionMode, Signal, Trade, DEFAULT_EXECUTION_MODE, DEFAULT_SYMBOL,
+    env_or, AIAction, ExecutionMode, Signal, Trade, TradeRecord, DEFAULT_EXECUTION_MODE,
+    DEFAULT_SYMBOL,
 };
 use ssm_execution::engine::ExecutionEngine;
-use ssm_execution::risk::{RiskConfig, RiskManager};
+use ssm_execution::risk::{RiskConfig, RiskManager, SizingMode};
 use ssm_execution::TradeStore;
 use ssm_nats::{Publisher, Subscriber};
 use std::collections::HashMap;
@@ -14,7 +15,31 @@ use tokio::sync::{mpsc, Mutex};
 const DEFAULT_STORE_PATH: &str = "data/trade-ssm.db";
 
 const DEFAULT_QUANTITY: &str = "0.001";
+const DEFAULT_INITIAL_BALANCE: &str = "10000";
 const MARK_TO_MARKET_INTERVAL_SECS: u64 = 10;
+
+/// Parse `SizingMode` from environment variables.
+fn sizing_mode_from_env() -> SizingMode {
+    match env_or("SIZING_MODE", "fixed").as_str() {
+        "kelly" => SizingMode::Kelly {
+            fraction_multiplier: env_or("KELLY_FRACTION_MULTIPLIER", "0.5")
+                .parse()
+                .unwrap_or(Decimal::new(5, 1)),
+            min_trades: env_or("KELLY_MIN_TRADES", "30").parse().unwrap_or(30),
+            fallback_fraction: env_or("KELLY_FALLBACK_FRACTION", "0.02")
+                .parse()
+                .unwrap_or(Decimal::new(2, 2)),
+            max_fraction: env_or("KELLY_MAX_FRACTION", "0.25")
+                .parse()
+                .unwrap_or(Decimal::new(25, 2)),
+        },
+        _ => SizingMode::Fixed {
+            fraction: env_or("POSITION_SIZE_FRACTION", "0.02")
+                .parse()
+                .unwrap_or(Decimal::new(2, 2)),
+        },
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,11 +53,15 @@ async fn main() -> Result<()> {
         "live" => ExecutionMode::Live,
         _ => ExecutionMode::Paper,
     };
-    let quantity: Decimal = env_or("TRADE_QUANTITY", DEFAULT_QUANTITY)
+    let default_quantity: Decimal = env_or("TRADE_QUANTITY", DEFAULT_QUANTITY)
         .parse()
         .context("parsing TRADE_QUANTITY")?;
+    let initial_balance: Decimal = env_or("INITIAL_BALANCE", DEFAULT_INITIAL_BALANCE)
+        .parse()
+        .unwrap_or(Decimal::from(10_000));
+    let sizing_mode = sizing_mode_from_env();
 
-    tracing::info!(%symbol, ?mode, %quantity, "execution service starting");
+    tracing::info!(%symbol, ?mode, %default_quantity, ?sizing_mode, "execution service starting");
 
     let nats_client = ssm_nats::connect().await?;
     let publisher = Publisher::new(nats_client.clone());
@@ -57,10 +86,17 @@ async fn main() -> Result<()> {
     }
 
     let engine = Arc::new(Mutex::new(engine_inner));
-    let risk = Arc::new(Mutex::new(RiskManager::new(
-        RiskConfig::default(),
-        Decimal::from(10_000),
-    )));
+    let risk_config = RiskConfig {
+        sizing_mode: sizing_mode.clone(),
+        ..Default::default()
+    };
+    let risk = Arc::new(Mutex::new(RiskManager::new(risk_config, initial_balance)));
+
+    // Track completed trades for Kelly sizing and paper balance.
+    let completed_trades: Arc<Mutex<Vec<TradeRecord>>> = Arc::new(Mutex::new(
+        store.load_trades(None, None, None).unwrap_or_default(),
+    ));
+    let paper_balance = Arc::new(Mutex::new(initial_balance));
 
     // Track latest price from trade feed
     let latest_price = Arc::new(Mutex::new(None::<Decimal>));
@@ -163,13 +199,30 @@ async fn main() -> Result<()> {
         let mut eng = engine.lock().await;
 
         // Risk check before execution
-        {
+        let quantity = {
             let risk_mgr = risk.lock().await;
             if risk_mgr.is_circuit_breaker_active() {
                 tracing::warn!("circuit breaker active, rejecting all orders");
                 continue;
             }
-        }
+
+            // Compute position size via configured SizingMode
+            let trades = completed_trades.lock().await;
+            let balance = *paper_balance.lock().await;
+            let notional = risk_mgr.position_size_for_mode(balance, &trades);
+            if notional <= Decimal::ZERO || current_price <= Decimal::ZERO {
+                tracing::info!("kelly sizing returned zero notional, skipping");
+                continue;
+            }
+            notional / current_price
+        };
+
+        // Fall back to default_quantity if dynamic sizing yields too-small value
+        let quantity = if quantity < Decimal::new(1, 8) {
+            default_quantity
+        } else {
+            quantity
+        };
 
         match eng.submit_signal(&signal, quantity, current_price) {
             Ok(order) => {

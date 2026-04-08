@@ -11,6 +11,13 @@ quantity = "0.001"
 max_drawdown_pct = 10.0
 max_open_positions = 3
 position_size_pct = 2.0
+# Position sizing mode: "fixed" or "kelly"
+# sizing_mode = "fixed"
+# Kelly criterion settings (used when sizing_mode = "kelly"):
+# kelly_fraction_multiplier = 0.5   # 1.0=full, 0.5=half, 0.25=quarter Kelly
+# kelly_min_trades = 30             # trades required before Kelly activates
+# kelly_fallback_fraction = 0.02    # fixed fraction used below min_trades
+# kelly_max_fraction = 0.25         # hard cap on Kelly fraction
 
 [notifications]
 enabled = false

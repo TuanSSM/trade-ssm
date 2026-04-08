@@ -2,8 +2,128 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use ssm_core::Side;
-use ssm_core::{Order, Position};
+use ssm_core::{Order, Position, TradeRecord};
 use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Position sizing mode
+// ---------------------------------------------------------------------------
+
+/// Position sizing strategy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SizingMode {
+    /// Fixed fraction of balance per trade.
+    Fixed {
+        /// Fraction of balance, e.g. 0.10 = 10%.
+        fraction: Decimal,
+    },
+    /// Kelly criterion with configurable fraction multiplier.
+    Kelly {
+        /// Multiplier on the raw Kelly fraction.
+        /// 1.0 = full Kelly, 0.5 = half-Kelly, 0.25 = quarter-Kelly.
+        fraction_multiplier: Decimal,
+        /// Don't use Kelly until this many completed trades exist.
+        /// Falls back to `fallback_fraction` before this threshold.
+        min_trades: usize,
+        /// Fixed fraction to use when not enough trades exist.
+        fallback_fraction: Decimal,
+        /// Hard cap on the Kelly fraction (before multiplying by balance).
+        max_fraction: Decimal,
+    },
+}
+
+impl Default for SizingMode {
+    fn default() -> Self {
+        SizingMode::Fixed {
+            fraction: Decimal::new(2, 2), // 2%
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kelly statistics
+// ---------------------------------------------------------------------------
+
+/// Minimal trade statistics needed for Kelly position sizing.
+#[derive(Debug, Clone)]
+pub struct KellyStats {
+    pub total_trades: usize,
+    pub win_rate: Decimal,
+    pub avg_win: Decimal,
+    pub avg_loss: Decimal,
+}
+
+impl KellyStats {
+    /// Compute Kelly-relevant stats from completed trades.
+    pub fn from_trades(trades: &[TradeRecord]) -> Self {
+        let total = trades.len();
+        if total == 0 {
+            return Self {
+                total_trades: 0,
+                win_rate: Decimal::ZERO,
+                avg_win: Decimal::ZERO,
+                avg_loss: Decimal::ZERO,
+            };
+        }
+
+        let mut win_count: usize = 0;
+        let mut win_sum = Decimal::ZERO;
+        let mut loss_count: usize = 0;
+        let mut loss_sum = Decimal::ZERO;
+
+        for t in trades {
+            if t.profit > Decimal::ZERO {
+                win_count += 1;
+                win_sum += t.profit;
+            } else if t.profit < Decimal::ZERO {
+                loss_count += 1;
+                loss_sum += t.profit.abs();
+            }
+        }
+
+        let win_rate = Decimal::from(win_count as u64) / Decimal::from(total as u64);
+        let avg_win = if win_count > 0 {
+            win_sum / Decimal::from(win_count as u64)
+        } else {
+            Decimal::ZERO
+        };
+        let avg_loss = if loss_count > 0 {
+            loss_sum / Decimal::from(loss_count as u64)
+        } else {
+            Decimal::ZERO
+        };
+
+        Self {
+            total_trades: total,
+            win_rate,
+            avg_win,
+            avg_loss,
+        }
+    }
+}
+
+/// Raw Kelly fraction: `W - (1-W)/R` where `R = avg_win / avg_loss`.
+///
+/// Returns zero for negative edge or zero risk-reward.
+pub fn kelly_fraction(stats: &KellyStats) -> Decimal {
+    if stats.avg_win.is_zero() {
+        return Decimal::ZERO;
+    }
+
+    let r = if stats.avg_loss > Decimal::ZERO {
+        stats.avg_win / stats.avg_loss
+    } else {
+        // No losses: treat as very high reward ratio, but cap to avoid overflow.
+        Decimal::new(999, 0)
+    };
+
+    let kelly = stats.win_rate - (Decimal::ONE - stats.win_rate) / r;
+    if kelly <= Decimal::ZERO {
+        Decimal::ZERO
+    } else {
+        kelly
+    }
+}
 
 /// Risk management configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +138,10 @@ pub struct RiskConfig {
     pub max_open_positions: usize,
     /// Fixed fractional position sizing (fraction of balance per trade).
     pub position_size_fraction: Decimal,
+    /// Position sizing strategy. When set, `position_size_for_mode` uses this
+    /// instead of `position_size_fraction`.
+    #[serde(default)]
+    pub sizing_mode: SizingMode,
 }
 
 impl Default for RiskConfig {
@@ -28,6 +152,7 @@ impl Default for RiskConfig {
             max_drawdown_pct: Decimal::new(10, 2), // 10%
             max_open_positions: 5,
             position_size_fraction: Decimal::new(2, 2), // 2%
+            sizing_mode: SizingMode::default(),
         }
     }
 }
@@ -160,7 +285,44 @@ impl RiskManager {
         size.min(self.config.max_position_size)
     }
 
+    /// Calculate the notional risk amount based on the configured `SizingMode`.
+    ///
+    /// - **Fixed mode**: returns `balance * fraction`, ignoring `trades`.
+    /// - **Kelly mode**: computes rolling stats from `trades`, applies the Kelly
+    ///   formula with the configured fraction multiplier and cap. Falls back to
+    ///   `fallback_fraction` when fewer than `min_trades` exist.
+    ///
+    /// The returned value is a notional amount (in quote currency). To convert to
+    /// base-asset quantity: `qty = (notional * leverage) / entry_price`.
+    pub fn position_size_for_mode(&self, balance: Decimal, trades: &[TradeRecord]) -> Decimal {
+        let fraction = match &self.config.sizing_mode {
+            SizingMode::Fixed { fraction } => *fraction,
+            SizingMode::Kelly {
+                fraction_multiplier,
+                min_trades,
+                fallback_fraction,
+                max_fraction,
+            } => {
+                let stats = KellyStats::from_trades(trades);
+                if stats.total_trades < *min_trades {
+                    *fallback_fraction
+                } else {
+                    let raw = kelly_fraction(&stats);
+                    if raw <= Decimal::ZERO {
+                        Decimal::ZERO
+                    } else {
+                        (raw * fraction_multiplier).min(*max_fraction)
+                    }
+                }
+            }
+        };
+        balance * fraction
+    }
+
     /// Calculate position size using Kelly criterion.
+    ///
+    /// Prefer `position_size_for_mode` for new code — it supports configurable
+    /// Kelly variants and automatic stats computation from trade history.
     ///
     /// kelly_fraction = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win
     pub fn kelly_position_size(
@@ -695,5 +857,272 @@ mod tests {
         // exposure = 1 * 50001 = 50001 > 50000
         let result = rm.check_order(&order, &positions, Decimal::from(50_001));
         assert!(matches!(result, RiskCheck::Rejected(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Kelly stats & sizing mode tests
+    // -----------------------------------------------------------------------
+
+    use ssm_core::ExitReason;
+
+    fn make_trade(profit: i64) -> TradeRecord {
+        TradeRecord {
+            id: "t".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            entry_price: Decimal::from(100),
+            exit_price: Decimal::from(100) + Decimal::from(profit),
+            quantity: Decimal::ONE,
+            profit: Decimal::from(profit),
+            profit_pct: Decimal::from(profit),
+            entry_time: 0,
+            exit_time: 1000,
+            duration_candles: 1,
+            exit_reason: ExitReason::Signal,
+            leverage: 1,
+            fee: Decimal::ZERO,
+        }
+    }
+
+    #[test]
+    fn kelly_stats_empty_trades() {
+        let stats = KellyStats::from_trades(&[]);
+        assert_eq!(stats.total_trades, 0);
+        assert_eq!(stats.win_rate, Decimal::ZERO);
+        assert_eq!(stats.avg_win, Decimal::ZERO);
+        assert_eq!(stats.avg_loss, Decimal::ZERO);
+    }
+
+    #[test]
+    fn kelly_stats_all_winners() {
+        let trades = vec![make_trade(100), make_trade(200)];
+        let stats = KellyStats::from_trades(&trades);
+        assert_eq!(stats.total_trades, 2);
+        assert_eq!(stats.win_rate, Decimal::ONE);
+        assert_eq!(stats.avg_win, Decimal::from(150));
+        assert_eq!(stats.avg_loss, Decimal::ZERO);
+    }
+
+    #[test]
+    fn kelly_stats_all_losers() {
+        let trades = vec![make_trade(-50), make_trade(-100)];
+        let stats = KellyStats::from_trades(&trades);
+        assert_eq!(stats.total_trades, 2);
+        assert_eq!(stats.win_rate, Decimal::ZERO);
+        assert_eq!(stats.avg_win, Decimal::ZERO);
+        assert_eq!(stats.avg_loss, Decimal::from(75));
+    }
+
+    #[test]
+    fn kelly_stats_mixed_trades() {
+        // 3 wins (+100 each), 1 loss (-50)
+        let trades = vec![
+            make_trade(100),
+            make_trade(100),
+            make_trade(100),
+            make_trade(-50),
+        ];
+        let stats = KellyStats::from_trades(&trades);
+        assert_eq!(stats.total_trades, 4);
+        assert_eq!(stats.win_rate, Decimal::new(75, 2)); // 0.75
+        assert_eq!(stats.avg_win, Decimal::from(100));
+        assert_eq!(stats.avg_loss, Decimal::from(50));
+    }
+
+    #[test]
+    fn kelly_fraction_positive_edge() {
+        // win_rate = 0.6, avg_win = 100, avg_loss = 50 => R = 2.0
+        // Kelly = 0.6 - 0.4/2.0 = 0.6 - 0.2 = 0.4
+        let stats = KellyStats {
+            total_trades: 100,
+            win_rate: Decimal::new(6, 1), // 0.6
+            avg_win: Decimal::from(100),
+            avg_loss: Decimal::from(50),
+        };
+        let f = kelly_fraction(&stats);
+        assert_eq!(f, Decimal::new(4, 1)); // 0.4
+    }
+
+    #[test]
+    fn kelly_fraction_negative_edge() {
+        // win_rate = 0.3, avg_win = 50, avg_loss = 100 => R = 0.5
+        // Kelly = 0.3 - 0.7/0.5 = 0.3 - 1.4 = -1.1 => 0
+        let stats = KellyStats {
+            total_trades: 50,
+            win_rate: Decimal::new(3, 1),
+            avg_win: Decimal::from(50),
+            avg_loss: Decimal::from(100),
+        };
+        assert_eq!(kelly_fraction(&stats), Decimal::ZERO);
+    }
+
+    #[test]
+    fn kelly_fraction_zero_avg_win() {
+        let stats = KellyStats {
+            total_trades: 10,
+            win_rate: Decimal::ZERO,
+            avg_win: Decimal::ZERO,
+            avg_loss: Decimal::from(100),
+        };
+        assert_eq!(kelly_fraction(&stats), Decimal::ZERO);
+    }
+
+    #[test]
+    fn kelly_fraction_no_losses() {
+        // win_rate = 1.0, no losses => R = 999
+        // Kelly = 1.0 - 0/999 = 1.0
+        let stats = KellyStats {
+            total_trades: 10,
+            win_rate: Decimal::ONE,
+            avg_win: Decimal::from(100),
+            avg_loss: Decimal::ZERO,
+        };
+        assert_eq!(kelly_fraction(&stats), Decimal::ONE);
+    }
+
+    #[test]
+    fn sizing_mode_fixed_ignores_trades() {
+        let config = RiskConfig {
+            sizing_mode: SizingMode::Fixed {
+                fraction: Decimal::new(10, 2), // 10%
+            },
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        let trades = vec![make_trade(100), make_trade(-50)];
+        let notional = rm.position_size_for_mode(Decimal::from(10_000), &trades);
+        assert_eq!(notional, Decimal::from(1_000)); // 10% of 10000
+    }
+
+    #[test]
+    fn sizing_mode_kelly_below_min_trades_uses_fallback() {
+        let config = RiskConfig {
+            sizing_mode: SizingMode::Kelly {
+                fraction_multiplier: Decimal::ONE,
+                min_trades: 10,
+                fallback_fraction: Decimal::new(5, 2), // 5%
+                max_fraction: Decimal::new(25, 2),
+            },
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        // Only 2 trades, below min_trades=10
+        let trades = vec![make_trade(100), make_trade(100)];
+        let notional = rm.position_size_for_mode(Decimal::from(10_000), &trades);
+        assert_eq!(notional, Decimal::from(500)); // 5% fallback of 10000
+    }
+
+    #[test]
+    fn sizing_mode_kelly_positive_edge() {
+        // 6 wins of +100, 4 losses of -50 => win_rate=0.6, avg_win=100, avg_loss=50
+        // R = 2.0, Kelly = 0.6 - 0.4/2.0 = 0.4
+        // half-Kelly: multiplier=0.5 => fraction = 0.4 * 0.5 = 0.20
+        let config = RiskConfig {
+            sizing_mode: SizingMode::Kelly {
+                fraction_multiplier: Decimal::new(5, 1), // 0.5
+                min_trades: 5,
+                fallback_fraction: Decimal::new(2, 2),
+                max_fraction: Decimal::new(25, 2), // 25%
+            },
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        let mut trades = Vec::new();
+        for _ in 0..6 {
+            trades.push(make_trade(100));
+        }
+        for _ in 0..4 {
+            trades.push(make_trade(-50));
+        }
+        let notional = rm.position_size_for_mode(Decimal::from(10_000), &trades);
+        // fraction = 0.4 * 0.5 = 0.20, notional = 10000 * 0.20 = 2000
+        assert_eq!(notional, Decimal::from(2_000));
+    }
+
+    #[test]
+    fn sizing_mode_kelly_negative_edge_returns_zero() {
+        // 2 wins of +50, 8 losses of -100 => win_rate=0.2, avg_win=50, avg_loss=100
+        // R=0.5, Kelly = 0.2 - 0.8/0.5 = 0.2 - 1.6 = -1.4 => 0
+        let config = RiskConfig {
+            sizing_mode: SizingMode::Kelly {
+                fraction_multiplier: Decimal::ONE,
+                min_trades: 5,
+                fallback_fraction: Decimal::new(2, 2),
+                max_fraction: Decimal::new(25, 2),
+            },
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        let mut trades = Vec::new();
+        for _ in 0..2 {
+            trades.push(make_trade(50));
+        }
+        for _ in 0..8 {
+            trades.push(make_trade(-100));
+        }
+        let notional = rm.position_size_for_mode(Decimal::from(10_000), &trades);
+        assert_eq!(notional, Decimal::ZERO);
+    }
+
+    #[test]
+    fn sizing_mode_kelly_max_fraction_cap() {
+        // 9 wins of +200, 1 loss of -10 => win_rate=0.9, avg_win=200, avg_loss=10
+        // R=20, Kelly = 0.9 - 0.1/20 = 0.9 - 0.005 = 0.895
+        // full Kelly (multiplier=1.0), capped at max_fraction=0.25
+        let config = RiskConfig {
+            sizing_mode: SizingMode::Kelly {
+                fraction_multiplier: Decimal::ONE,
+                min_trades: 5,
+                fallback_fraction: Decimal::new(2, 2),
+                max_fraction: Decimal::new(25, 2), // 25%
+            },
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        let mut trades = Vec::new();
+        for _ in 0..9 {
+            trades.push(make_trade(200));
+        }
+        trades.push(make_trade(-10));
+        let notional = rm.position_size_for_mode(Decimal::from(10_000), &trades);
+        // fraction = min(0.895, 0.25) = 0.25, notional = 10000 * 0.25 = 2500
+        assert_eq!(notional, Decimal::from(2_500));
+    }
+
+    #[test]
+    fn sizing_mode_kelly_quarter_kelly() {
+        // Same stats: win_rate=0.6, R=2.0, Kelly=0.4
+        // quarter-Kelly: multiplier=0.25 => fraction = 0.4 * 0.25 = 0.10
+        let config = RiskConfig {
+            sizing_mode: SizingMode::Kelly {
+                fraction_multiplier: Decimal::new(25, 2), // 0.25
+                min_trades: 5,
+                fallback_fraction: Decimal::new(2, 2),
+                max_fraction: Decimal::new(50, 2),
+            },
+            ..Default::default()
+        };
+        let rm = RiskManager::new(config, Decimal::from(100_000));
+        let mut trades = Vec::new();
+        for _ in 0..6 {
+            trades.push(make_trade(100));
+        }
+        for _ in 0..4 {
+            trades.push(make_trade(-50));
+        }
+        let notional = rm.position_size_for_mode(Decimal::from(10_000), &trades);
+        // fraction = 0.4 * 0.25 = 0.10, notional = 10000 * 0.10 = 1000
+        assert_eq!(notional, Decimal::from(1_000));
+    }
+
+    #[test]
+    fn sizing_mode_default_is_fixed() {
+        let mode = SizingMode::default();
+        match mode {
+            SizingMode::Fixed { fraction } => {
+                assert_eq!(fraction, Decimal::new(2, 2));
+            }
+            _ => panic!("default should be Fixed"),
+        }
     }
 }
