@@ -28,15 +28,24 @@ async fn main() -> Result<()> {
         "downloading historical data"
     );
 
+    let correlation_pairs: Vec<String> = std::env::var("CORRELATION_PAIRS")
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !correlation_pairs.is_empty() {
+        tracing::info!(pairs = ?correlation_pairs, "will also download correlated pair data");
+    }
+
     let client = BinanceClient::new();
-    let candles = history::download_candles(
-        &client,
-        &symbol,
-        &interval,
-        start.timestamp_millis(),
-        end.timestamp_millis(),
-    )
-    .await?;
+    let start_ms = start.timestamp_millis();
+    let end_ms = end.timestamp_millis();
+
+    let candles = history::download_candles(&client, &symbol, &interval, start_ms, end_ms).await?;
 
     if candles.is_empty() {
         tracing::warn!("no candles downloaded");
@@ -56,6 +65,33 @@ async fn main() -> Result<()> {
         file = %path.display(),
         "download complete"
     );
+
+    // Download correlated pair data using the same interval and date range
+    for corr_symbol in &correlation_pairs {
+        tracing::info!(symbol = %corr_symbol, "downloading correlated pair data");
+        let corr_candles =
+            history::download_candles(&client, corr_symbol, &interval, start_ms, end_ms).await?;
+
+        if corr_candles.is_empty() {
+            tracing::warn!(symbol = %corr_symbol, "no candles downloaded for correlated pair");
+            continue;
+        }
+
+        let corr_first = format_epoch_date(corr_candles.first().unwrap().open_time);
+        let corr_last = format_epoch_date(corr_candles.last().unwrap().open_time);
+        let corr_filename = format!("{corr_symbol}-{interval}-{corr_first}-{corr_last}.json");
+        let corr_path = PathBuf::from(&datadir).join(&corr_filename);
+
+        history::save_candles(&corr_candles, &corr_path)?;
+
+        tracing::info!(
+            symbol = %corr_symbol,
+            candles = corr_candles.len(),
+            file = %corr_path.display(),
+            "correlated pair download complete"
+        );
+    }
+
     Ok(())
 }
 

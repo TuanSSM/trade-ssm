@@ -219,6 +219,10 @@ pub struct RlConfig {
     /// Training lifecycle parameters (FreqAI-style).
     #[serde(default)]
     pub training: TrainingConfig,
+    /// Symbols whose candle data is included as correlated features.
+    /// E.g. `["ETHUSDT", "BTCUSDT"]` when trading LINKUSDT.
+    #[serde(default)]
+    pub correlation_pairs: Vec<String>,
 }
 
 impl Default for RlConfig {
@@ -228,6 +232,7 @@ impl Default for RlConfig {
             reward: RewardConfig::default(),
             timeframes: vec!["15m".to_string()],
             training: TrainingConfig::default(),
+            correlation_pairs: vec![],
         }
     }
 }
@@ -550,5 +555,27 @@ mod tests {
         assert!((parsed.exposure_penalty_rate - 0.05).abs() < f64::EPSILON);
         assert!((parsed.exposure_penalty_threshold - 1.2).abs() < f64::EPSILON);
         assert!((parsed.hedge_bonus - 0.01).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rl_config_correlation_pairs_serde_roundtrip() {
+        let cfg = RlConfig {
+            correlation_pairs: vec!["ETHUSDT".into(), "BTCUSDT".into()],
+            ..RlConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: RlConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.correlation_pairs, vec!["ETHUSDT", "BTCUSDT"]);
+    }
+
+    #[test]
+    fn rl_config_no_correlation_pairs_backward_compat() {
+        let json = r#"{
+            "env": {"fee_rate": 0.0, "slippage_rate": 0.0, "initial_balance": 10000.0, "position_size_pct": 1.0, "max_steps": null, "hedge_mode": false, "max_gross_exposure": 2.0},
+            "reward": {"hold_penalty_threshold": 20, "hold_penalty_rate": 0.001, "invalid_action_penalty": 0.01, "close_penalty_threshold": 50, "close_penalty_rate": 0.001, "fee_penalty": false, "win_bonus": 0.0, "drawdown_penalty_rate": 0.0, "exposure_penalty_rate": 0.0, "exposure_penalty_threshold": 1.5, "hedge_bonus": 0.0},
+            "timeframes": ["15m"]
+        }"#;
+        let parsed: RlConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.correlation_pairs.is_empty());
     }
 }

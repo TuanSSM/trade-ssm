@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ssm_ai::config::RlConfig;
+use ssm_ai::correlated_features::CorrelatedPairFeatures;
 use ssm_ai::env::TradingEnv;
 use ssm_ai::features::{extract_features, label_features, FEATURE_COUNT};
 use ssm_ai::metrics::EpisodeMetrics;
@@ -8,8 +9,10 @@ use ssm_ai::multi_timeframe::Timeframe;
 use ssm_ai::optimizer::run_trial;
 use ssm_core::{AIAction, Candle};
 use ssm_nats::{Publisher, Subscriber};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
 const DEFAULT_SYMBOL: &str = "BTCUSDT";
 const DEFAULT_INTERVAL: &str = "15m";
@@ -32,16 +35,31 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(LEARNING_RATE);
 
-    tracing::info!(%symbol, %interval, %model_dir, "rl-trainer service starting");
+    let correlation_pairs: Vec<String> = env_or("CORRELATION_PAIRS", "")
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    tracing::info!(
+        %symbol, %interval, %model_dir,
+        correlation_pairs = ?correlation_pairs,
+        "rl-trainer service starting"
+    );
 
     // Ensure model directory exists
     std::fs::create_dir_all(&model_dir)?;
 
     let nats_client = ssm_nats::connect().await?;
     let publisher = Publisher::new(nats_client.clone());
-    let subscriber = Subscriber::new(nats_client);
 
-    let config = RlConfig::default();
+    let config = RlConfig {
+        correlation_pairs: correlation_pairs.clone(),
+        ..RlConfig::default()
+    };
+
+    // Compute feature count including correlated pairs
+    let total_features = FEATURE_COUNT + FEATURE_COUNT * correlation_pairs.len();
 
     // Initialize or load model
     let model_path = PathBuf::from(&model_dir).join("table_model_latest.json");
@@ -50,23 +68,57 @@ async fn main() -> Result<()> {
         TableModel::from_checkpoint(&model_path)?
     } else {
         tracing::info!(
-            "initializing new TableModel with {} features",
-            FEATURE_COUNT
+            "initializing new TableModel with {} features ({} base + {} correlated)",
+            total_features,
+            FEATURE_COUNT,
+            FEATURE_COUNT * correlation_pairs.len(),
         );
-        TableModel::new(FEATURE_COUNT, learning_rate)
+        TableModel::new(total_features, learning_rate)
     };
 
     let mut best_sharpe = f64::NEG_INFINITY;
 
-    // Subscribe to candle feed
+    // Subscribe to primary candle feed
     let candle_topic = ssm_nats::topics::candles(&symbol, &interval);
     let (tx, mut rx) = mpsc::channel::<Candle>(1_000);
 
+    let primary_sub = Subscriber::new(nats_client.clone());
     tokio::spawn(async move {
-        if let Err(e) = subscriber.subscribe_typed(&candle_topic, tx).await {
+        if let Err(e) = primary_sub.subscribe_typed(&candle_topic, tx).await {
             tracing::error!(error = %e, "candle subscription failed");
         }
     });
+
+    // Subscribe to correlated pair candle feeds with shared buffer
+    let corr_buffers: Arc<Mutex<HashMap<String, Vec<Candle>>>> = {
+        let mut map = HashMap::new();
+        for pair in &correlation_pairs {
+            map.insert(pair.clone(), Vec::new());
+        }
+        Arc::new(Mutex::new(map))
+    };
+
+    for pair in &correlation_pairs {
+        let corr_topic = ssm_nats::topics::candles(pair, &interval);
+        let (corr_tx, mut corr_rx) = mpsc::channel::<Candle>(1_000);
+        let corr_sub = Subscriber::new(nats_client.clone());
+        let pair_clone = pair.clone();
+        tokio::spawn(async move {
+            if let Err(e) = corr_sub.subscribe_typed(&corr_topic, corr_tx).await {
+                tracing::error!(symbol = %pair_clone, error = %e, "correlated pair subscription failed");
+            }
+        });
+        let buffers = Arc::clone(&corr_buffers);
+        let pair_for_drain = pair.clone();
+        tokio::spawn(async move {
+            while let Some(candle) = corr_rx.recv().await {
+                let mut map = buffers.lock().await;
+                if let Some(buf) = map.get_mut(&pair_for_drain) {
+                    buf.push(candle);
+                }
+            }
+        });
+    }
 
     let mut candle_buffer: Vec<Candle> = Vec::new();
     let mut candles_since_train = 0usize;
@@ -83,10 +135,28 @@ async fn main() -> Result<()> {
         if candle_buffer.len() >= MIN_TRAINING_CANDLES
             && candles_since_train >= RETRAIN_INTERVAL_CANDLES
         {
-            tracing::info!(candles = candle_buffer.len(), "starting training cycle");
+            // Snapshot correlated buffers for training
+            let corr_snapshot: HashMap<String, Vec<Candle>> =
+                corr_buffers.lock().await.clone();
+
+            tracing::info!(
+                candles = candle_buffer.len(),
+                correlated_pairs = corr_snapshot.len(),
+                "starting training cycle"
+            );
 
             // Phase 1: Supervised pre-training on labeled features
             let mut features = extract_features(&candle_buffer, CVD_WINDOW);
+
+            // Merge correlated pair features
+            if !correlation_pairs.is_empty() && !corr_snapshot.is_empty() {
+                let cpf = CorrelatedPairFeatures::new(
+                    String::new(),
+                    correlation_pairs.clone(),
+                );
+                features = cpf.merge_features(&features, &corr_snapshot, CVD_WINDOW);
+            }
+
             label_features(&mut features, &candle_buffer, LABEL_HORIZON);
 
             let labeled: Vec<_> = features.into_iter().filter(|f| f.label.is_some()).collect();
@@ -110,7 +180,13 @@ async fn main() -> Result<()> {
 
             // Phase 2: Evaluate via RL environment rollout
             let steps_per_year = tf.steps_per_year();
-            let eval_metrics = evaluate_model(&model, &candle_buffer, &config, steps_per_year);
+            let eval_metrics = evaluate_model(
+                &model,
+                &candle_buffer,
+                &config,
+                steps_per_year,
+                &corr_snapshot,
+            );
 
             tracing::info!(
                 return_pct = format!("{:.2}", eval_metrics.total_return_pct),
@@ -179,8 +255,15 @@ fn evaluate_model(
     candles: &[Candle],
     config: &RlConfig,
     steps_per_year: f64,
+    correlated_candles: &HashMap<String, Vec<Candle>>,
 ) -> EpisodeMetrics {
     let features = extract_features(candles, CVD_WINDOW);
+    let features = if !config.correlation_pairs.is_empty() && !correlated_candles.is_empty() {
+        let cpf = CorrelatedPairFeatures::new(String::new(), config.correlation_pairs.clone());
+        cpf.merge_features(&features, correlated_candles, CVD_WINDOW)
+    } else {
+        features
+    };
     let mut env =
         TradingEnv::with_config(candles.to_vec(), config.env.clone(), config.reward.clone());
     let mut obs = env.reset();

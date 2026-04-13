@@ -16,6 +16,12 @@ drawdown_penalty_rate = 0.0
 
 timeframes = ["3m", "15m", "1h", "4h"]
 
+# Correlated pair symbols whose candle data enriches the RL feature vector.
+# Each pair adds 22 features (full indicator set) to the observation space.
+# Example: when trading LINKUSDT, include ETH and BTC as correlated context.
+# correlation_pairs = ["ETHUSDT", "BTCUSDT"]
+correlation_pairs = []
+
 [optimize]
 enabled = false
 objective = "SharpeRatio"

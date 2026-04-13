@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use ssm_core::{AIAction, Candle, FeatureRow};
 
 use crate::config::{EnvConfig, RewardConfig, TrainingConfig};
+use crate::correlated_features::CorrelatedPairFeatures;
 use crate::env::{TradingEnv, STATE_INFO_COUNT};
 use crate::episode_sampler::EpisodeSampler;
 use crate::features::{drop_ohlc_batch, extract_features, FEATURE_COUNT, FEATURE_COUNT_NO_OHLC};
@@ -31,6 +34,10 @@ pub struct TrainerConfig {
     /// Training lifecycle parameters (FreqAI-style).
     #[serde(default)]
     pub training: TrainingConfig,
+    /// Symbols whose candle data enriches the feature vector via `CorrelatedPairFeatures`.
+    /// E.g. `["ETHUSDT", "BTCUSDT"]` when trading LINKUSDT.
+    #[serde(default)]
+    pub correlation_pairs: Vec<String>,
 }
 
 impl Default for TrainerConfig {
@@ -46,6 +53,7 @@ impl Default for TrainerConfig {
             steps_per_year: 35040.0,
             min_episode_length: 50,
             training: TrainingConfig::default(),
+            correlation_pairs: vec![],
         }
     }
 }
@@ -81,17 +89,32 @@ impl RlTrainer {
         }
     }
 
-    /// Run the full training loop on the provided candles.
+    /// Run the full training loop on the provided candles (single symbol).
     pub fn train(&self, candles: &[Candle]) -> TrainResult {
-        // 1. Extract features
+        self.train_with_correlated(candles, &HashMap::new())
+    }
+
+    /// Run the full training loop with correlated pair candle data.
+    ///
+    /// Correlated pair features are appended to the primary feature vector,
+    /// giving the RL agent cross-asset context (e.g. ETH + BTC when trading LINK).
+    pub fn train_with_correlated(
+        &self,
+        candles: &[Candle],
+        correlated_candles: &HashMap<String, Vec<Candle>>,
+    ) -> TrainResult {
+        // 1. Extract primary features
         let features = extract_features(candles, self.config.cvd_window);
 
-        // 1b. Optionally drop OHLC features (indices 0-3)
+        // 1b. Optionally drop OHLC features (indices 0-3) from primary
         let features = if self.config.training.drop_ohlc_from_features {
             drop_ohlc_batch(&features)
         } else {
             features
         };
+
+        // 1c. Merge correlated pair features
+        let (features, num_corr_pairs) = self.merge_correlated(features, correlated_candles);
 
         // 2. Optionally fit normalizer and transform
         let normalizer = if self.config.normalize_features {
@@ -110,11 +133,14 @@ impl RlTrainer {
         } else {
             FEATURE_COUNT
         };
-        let input_dim = if self.config.env.add_state_info {
-            base_features + STATE_INFO_COUNT
-        } else {
-            base_features
-        };
+        let corr_feature_count = FEATURE_COUNT * num_corr_pairs;
+        let input_dim = base_features
+            + corr_feature_count
+            + if self.config.env.add_state_info {
+                STATE_INFO_COUNT
+            } else {
+                0
+            };
 
         // 4. Create agent with correct dimensions
         let mut ppo_config = self.config.ppo.clone();
@@ -157,6 +183,10 @@ impl RlTrainer {
                 } else {
                     window_features
                 };
+                // Merge correlated features for this window (anti-repainting safe)
+                let window_end_time = window.last().map(|c| c.close_time).unwrap_or(i64::MAX);
+                let sliced_corr = slice_correlated_to_window(correlated_candles, window_end_time);
+                let (window_features, _) = self.merge_correlated(window_features, &sliced_corr);
                 let window_features = match &normalizer {
                     Some(n) => n.transform_batch(&window_features),
                     None => window_features,
@@ -193,6 +223,27 @@ impl RlTrainer {
             epoch_metrics,
             total_episodes,
         }
+    }
+
+    /// Merge correlated pair features into primary features if configured.
+    /// Returns the (possibly enriched) features and the number of correlated pairs merged.
+    fn merge_correlated(
+        &self,
+        features: Vec<FeatureRow>,
+        correlated_candles: &HashMap<String, Vec<Candle>>,
+    ) -> (Vec<FeatureRow>, usize) {
+        if self.config.correlation_pairs.is_empty() || correlated_candles.is_empty() {
+            return (features, 0);
+        }
+        let num_corr_pairs = self
+            .config
+            .correlation_pairs
+            .iter()
+            .filter(|p| correlated_candles.contains_key(*p))
+            .count();
+        let cpf = CorrelatedPairFeatures::new(String::new(), self.config.correlation_pairs.clone());
+        let merged = cpf.merge_features(&features, correlated_candles, self.config.cvd_window);
+        (merged, num_corr_pairs)
     }
 
     fn run_episode(&self, agent: &mut PpoAgent, candles: &[Candle], features: &[FeatureRow]) {
@@ -260,6 +311,25 @@ impl RlTrainer {
 
         env.episode_metrics(self.config.steps_per_year)
     }
+}
+
+/// Filter correlated candles to only include data up to the window boundary.
+/// Prevents anti-repainting violations when episode sampling selects a sub-window.
+fn slice_correlated_to_window(
+    correlated: &HashMap<String, Vec<Candle>>,
+    window_end_time: i64,
+) -> HashMap<String, Vec<Candle>> {
+    correlated
+        .iter()
+        .map(|(k, candles)| {
+            let sliced: Vec<Candle> = candles
+                .iter()
+                .filter(|c| c.close_time <= window_end_time)
+                .cloned()
+                .collect();
+            (k.clone(), sliced)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -487,5 +557,170 @@ mod tests {
         let trainer = RlTrainer::new(config);
         let result = trainer.train(&candles);
         assert_eq!(result.epoch_metrics.len(), 1);
+    }
+
+    fn make_candles_with_timestamps(n: usize) -> Vec<Candle> {
+        let interval = 900_000i64; // 15m
+        (0..n)
+            .map(|i| {
+                let price = format!("{}", 100 + (i % 10));
+                let p = Decimal::from_str(&price).unwrap();
+                Candle {
+                    open_time: (i as i64) * interval,
+                    open: p,
+                    high: p + Decimal::from(5),
+                    low: p - Decimal::from(5),
+                    close: p,
+                    volume: Decimal::from(100),
+                    close_time: (i as i64) * interval + interval - 1,
+                    quote_volume: Decimal::ZERO,
+                    trades: 100,
+                    taker_buy_volume: Decimal::from(60),
+                    taker_sell_volume: Decimal::from(40),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn train_with_correlated_pairs() {
+        let primary = make_candles_with_timestamps(60);
+        let corr_eth = make_candles_with_timestamps(60);
+        let corr_btc = make_candles_with_timestamps(60);
+        let mut correlated = HashMap::new();
+        correlated.insert("ETHUSDT".to_string(), corr_eth);
+        correlated.insert("BTCUSDT".to_string(), corr_btc);
+
+        let config = TrainerConfig {
+            n_epochs: 1,
+            episodes_per_epoch: 1,
+            min_episode_length: 10,
+            correlation_pairs: vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()],
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train_with_correlated(&primary, &correlated);
+        assert_eq!(result.epoch_metrics.len(), 1);
+    }
+
+    #[test]
+    fn train_with_empty_correlation_pairs_matches_train() {
+        let candles = make_candles(60);
+        let config = TrainerConfig {
+            n_epochs: 1,
+            episodes_per_epoch: 1,
+            min_episode_length: 10,
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result_plain = trainer.train(&candles);
+        let result_corr = trainer.train_with_correlated(&candles, &HashMap::new());
+        assert_eq!(
+            result_plain.epoch_metrics.len(),
+            result_corr.epoch_metrics.len()
+        );
+    }
+
+    #[test]
+    fn train_with_correlated_and_drop_ohlc() {
+        let primary = make_candles_with_timestamps(60);
+        let corr = make_candles_with_timestamps(60);
+        let mut correlated = HashMap::new();
+        correlated.insert("ETHUSDT".to_string(), corr);
+
+        let config = TrainerConfig {
+            n_epochs: 1,
+            episodes_per_epoch: 1,
+            min_episode_length: 10,
+            correlation_pairs: vec!["ETHUSDT".to_string()],
+            training: TrainingConfig {
+                train_cycles: 0,
+                drop_ohlc_from_features: true,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train_with_correlated(&primary, &correlated);
+        assert_eq!(result.epoch_metrics.len(), 1);
+    }
+
+    #[test]
+    fn train_with_correlated_and_state_info() {
+        let primary = make_candles_with_timestamps(60);
+        let corr = make_candles_with_timestamps(60);
+        let mut correlated = HashMap::new();
+        correlated.insert("ETHUSDT".to_string(), corr);
+
+        let config = TrainerConfig {
+            n_epochs: 1,
+            episodes_per_epoch: 1,
+            min_episode_length: 10,
+            correlation_pairs: vec!["ETHUSDT".to_string()],
+            env: EnvConfig {
+                add_state_info: true,
+                ..EnvConfig::default()
+            },
+            training: TrainingConfig {
+                train_cycles: 0,
+                ..TrainingConfig::default()
+            },
+            ..TrainerConfig::default()
+        };
+        let trainer = RlTrainer::new(config);
+        let result = trainer.train_with_correlated(&primary, &correlated);
+        assert_eq!(result.epoch_metrics.len(), 1);
+    }
+
+    #[test]
+    fn trainer_config_correlation_pairs_serde_roundtrip() {
+        let config = TrainerConfig {
+            correlation_pairs: vec!["ETHUSDT".into(), "BTCUSDT".into()],
+            ..TrainerConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: TrainerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.correlation_pairs, vec!["ETHUSDT", "BTCUSDT"]);
+    }
+
+    #[test]
+    fn slice_correlated_to_window_filters_future() {
+        let interval = 900_000i64;
+        let candles: Vec<Candle> = (0..10)
+            .map(|i| {
+                let p = Decimal::from(100);
+                Candle {
+                    open_time: (i as i64) * interval,
+                    open: p,
+                    high: p,
+                    low: p,
+                    close: p,
+                    volume: Decimal::from(100),
+                    close_time: (i as i64) * interval + interval - 1,
+                    quote_volume: Decimal::ZERO,
+                    trades: 10,
+                    taker_buy_volume: Decimal::from(50),
+                    taker_sell_volume: Decimal::from(50),
+                }
+            })
+            .collect();
+
+        let mut correlated = HashMap::new();
+        correlated.insert("ETHUSDT".to_string(), candles);
+
+        // Window ends at candle 5 close_time
+        let window_end = 5 * interval + interval - 1;
+        let sliced = slice_correlated_to_window(&correlated, window_end);
+        let eth = sliced.get("ETHUSDT").unwrap();
+        assert_eq!(eth.len(), 6); // candles 0..=5
+        assert!(eth.iter().all(|c| c.close_time <= window_end));
     }
 }
