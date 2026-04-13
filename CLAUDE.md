@@ -231,6 +231,70 @@ All workflows use `appleboy/telegram-action@v1.0.0` (pinned version) with HTML f
 | `DATADIR` | download-data | no | user_data |
 | `DATAFILE` | backtest | yes | — |
 | `CVD_WINDOW` | backtest | no | 15 |
+| `CORRELATION_PAIRS` | download-data, rl-trainer | no | — |
+| `CORR_DATAFILES` | rl-backtest | no | — |
+| `RL_CONFIG` | rl-backtest | no | — |
+| `RL_MODE` | rl-backtest | no | single |
+| `MODEL_PATH` | rl-backtest | no | — |
+
+## Correlated pairs (multi-asset RL context)
+
+Train RL models with cross-asset context. Example: trading LINKUSDT with
+ETHUSDT + BTCUSDT as correlated pairs enriches the feature vector with
+each pair's 22 raw indicators plus 5 derived cross-pair features
+(price ratio, volume ratio, relative strength, spread, CVD flow divergence).
+
+### Configuration
+
+TOML (`config/rl-default.toml`):
+```toml
+correlation_pairs = ["ETHUSDT", "BTCUSDT"]
+```
+
+Environment variables:
+```bash
+CORRELATION_PAIRS=ETHUSDT,BTCUSDT                          # download-data, rl-trainer
+CORR_DATAFILES=ETHUSDT:eth.json,BTCUSDT:btc.json           # rl-backtest
+```
+
+### Workflow
+
+```bash
+# 1. Download primary + correlated data
+SYMBOL=LINKUSDT CORRELATION_PAIRS=ETHUSDT,BTCUSDT just download-data
+
+# 2. Train RL model (live via NATS, includes correlated feeds)
+SYMBOL=LINKUSDT CORRELATION_PAIRS=ETHUSDT,BTCUSDT cargo run --bin rl-trainer
+
+# 3. Backtest trained model with correlated context
+DATAFILE=user_data/LINKUSDT-15m.json \
+  CORR_DATAFILES="ETHUSDT:user_data/ETHUSDT-15m.json,BTCUSDT:user_data/BTCUSDT-15m.json" \
+  RL_MODE=model MODEL_PATH=models/table_model_best.json \
+  cargo run --bin rl-backtest
+```
+
+### Feature vector layout
+
+| Segment | Count | Description |
+|---------|-------|-------------|
+| Primary indicators | 22 | OHLC, volume, CVD, RSI, EMA, MACD, BB, ATR, OBV, VWAP |
+| Per-pair raw indicators | 22×N | Same 22 indicators from each correlated pair |
+| Per-pair derived features | 5×N | price_ratio, volume_ratio, relative_strength, spread, corr_momentum |
+| State info (optional) | 8 | Position, PnL, exposure (when `add_state_info = true`) |
+
+Total: `22 + 27×N [+ 8]` features (N = number of correlated pairs).
+
+### Validation
+
+- Duplicate pairs and self-references are rejected via `validate_correlation_pairs()`
+- Stale correlated data (>2× candle interval lag) emits a tracing warning
+- Missing correlated pair data is zero-padded (graceful degradation)
+
+### Anti-repainting
+
+- Correlated features matched by `timestamp <= primary_row.timestamp`
+- Episode sampling slices correlated candles to `close_time <= window_end_time`
+- Append-one-candle test: correlated features at `[0..N]` stable when `N+1` added
 
 ## Anti-repainting rules
 

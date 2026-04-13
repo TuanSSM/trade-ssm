@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ssm_ai::config::RlConfig;
 use ssm_ai::correlated_features::CorrelatedPairFeatures;
+use ssm_ai::correlated_features::CROSS_PAIR_FEATURE_COUNT;
 use ssm_ai::env::TradingEnv;
 use ssm_ai::features::{extract_features, label_features, FEATURE_COUNT};
 use ssm_ai::metrics::EpisodeMetrics;
@@ -41,6 +42,12 @@ async fn main() -> Result<()> {
         .filter(|p| !p.is_empty())
         .collect();
 
+    // Validate correlation pairs
+    if let Err(e) = ssm_ai::config::validate_correlation_pairs(&symbol, &correlation_pairs) {
+        tracing::error!(error = %e, "invalid correlation pairs configuration");
+        return Err(e.into());
+    }
+
     tracing::info!(
         %symbol, %interval, %model_dir,
         correlation_pairs = ?correlation_pairs,
@@ -58,8 +65,9 @@ async fn main() -> Result<()> {
         ..RlConfig::default()
     };
 
-    // Compute feature count including correlated pairs
-    let total_features = FEATURE_COUNT + FEATURE_COUNT * correlation_pairs.len();
+    // Compute feature count: 22 base + (22 raw + 5 derived) per correlated pair
+    let total_features =
+        FEATURE_COUNT + (FEATURE_COUNT + CROSS_PAIR_FEATURE_COUNT) * correlation_pairs.len();
 
     // Initialize or load model
     let model_path = PathBuf::from(&model_dir).join("table_model_latest.json");
@@ -135,9 +143,17 @@ async fn main() -> Result<()> {
         if candle_buffer.len() >= MIN_TRAINING_CANDLES
             && candles_since_train >= RETRAIN_INTERVAL_CANDLES
         {
-            // Snapshot correlated buffers for training
-            let corr_snapshot: HashMap<String, Vec<Candle>> =
-                corr_buffers.lock().await.clone();
+            // Snapshot correlated buffers and trim to bound memory
+            let corr_snapshot: HashMap<String, Vec<Candle>> = {
+                let mut map = corr_buffers.lock().await;
+                let max_buffer = candle_buffer.len() * 2;
+                for buf in map.values_mut() {
+                    if buf.len() > max_buffer {
+                        buf.drain(0..buf.len() - max_buffer);
+                    }
+                }
+                map.clone()
+            };
 
             tracing::info!(
                 candles = candle_buffer.len(),
@@ -148,13 +164,18 @@ async fn main() -> Result<()> {
             // Phase 1: Supervised pre-training on labeled features
             let mut features = extract_features(&candle_buffer, CVD_WINDOW);
 
-            // Merge correlated pair features
+            // Merge correlated pair features (raw + derived)
             if !correlation_pairs.is_empty() && !corr_snapshot.is_empty() {
                 let cpf = CorrelatedPairFeatures::new(
                     String::new(),
                     correlation_pairs.clone(),
                 );
-                features = cpf.merge_features(&features, &corr_snapshot, CVD_WINDOW);
+                features = cpf.merge_features_with_derived(
+                    &features,
+                    &candle_buffer,
+                    &corr_snapshot,
+                    CVD_WINDOW,
+                );
             }
 
             label_features(&mut features, &candle_buffer, LABEL_HORIZON);
@@ -260,7 +281,7 @@ fn evaluate_model(
     let features = extract_features(candles, CVD_WINDOW);
     let features = if !config.correlation_pairs.is_empty() && !correlated_candles.is_empty() {
         let cpf = CorrelatedPairFeatures::new(String::new(), config.correlation_pairs.clone());
-        cpf.merge_features(&features, correlated_candles, CVD_WINDOW)
+        cpf.merge_features_with_derived(&features, candles, correlated_candles, CVD_WINDOW)
     } else {
         features
     };

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use ssm_ai::config::{OptimizeConfig, RlConfig};
+use ssm_ai::config::{validate_correlation_pairs, OptimizeConfig, RlConfig};
 use ssm_ai::correlated_features::CorrelatedPairFeatures;
 use ssm_ai::env::{Observation, TradingEnv};
 use ssm_ai::features::extract_features;
@@ -63,6 +63,14 @@ fn main() -> Result<()> {
         bail!("need at least 10 candles, got {}", candles.len());
     }
 
+    // Validate correlation pairs against SYMBOL (if set)
+    let symbol = std::env::var("SYMBOL").unwrap_or_default();
+    if !symbol.is_empty() {
+        if let Err(e) = validate_correlation_pairs(&symbol, &rl_config.correlation_pairs) {
+            bail!("correlation pair config error: {e}");
+        }
+    }
+
     let correlated_candles = load_correlated_candles(&rl_config)?;
 
     tracing::info!(
@@ -75,10 +83,17 @@ fn main() -> Result<()> {
     );
 
     match mode.as_str() {
-        "single" => run_single(&candles, &rl_config, &tf_str, &path)?,
+        "single" => run_single(&candles, &rl_config, &tf_str, &path, &correlated_candles)?,
         "model" => run_model(&candles, &rl_config, &tf_str, &path, &correlated_candles)?,
-        "optimize" => run_optimize(&candles, &rl_config, &opt_config, &tf_str, &path)?,
-        "multi_tf" => run_multi_tf(&candles, &rl_config, &path)?,
+        "optimize" => run_optimize(
+            &candles,
+            &rl_config,
+            &opt_config,
+            &tf_str,
+            &path,
+            &correlated_candles,
+        )?,
+        "multi_tf" => run_multi_tf(&candles, &rl_config, &path, &correlated_candles)?,
         other => bail!("unknown RL_MODE: {other} (expected: single, model, optimize, multi_tf)"),
     }
 
@@ -112,7 +127,14 @@ fn load_correlated_candles(config: &RlConfig) -> Result<HashMap<String, Vec<Cand
                 continue;
             }
             let parts: Vec<&str> = entry.splitn(2, ':').collect();
-            if parts.len() == 2 {
+            if parts.len() != 2 {
+                tracing::warn!(
+                    entry = %entry,
+                    "malformed CORR_DATAFILES entry, expected 'SYMBOL:path'"
+                );
+                continue;
+            }
+            {
                 let symbol = parts[0].to_string();
                 let path = PathBuf::from(parts[1]);
                 let candles = history::load_candles(&path).with_context(|| {
@@ -164,9 +186,17 @@ fn run_single(
     config: &RlConfig,
     tf_str: &str,
     path: &std::path::Path,
+    correlated_candles: &HashMap<String, Vec<Candle>>,
 ) -> Result<()> {
     let tf = Timeframe::parse(tf_str).unwrap_or(Timeframe::M15);
     let steps_per_year = tf.steps_per_year();
+
+    if !config.correlation_pairs.is_empty() && !correlated_candles.is_empty() {
+        tracing::info!(
+            pairs = ?config.correlation_pairs,
+            "note: momentum baseline does not use correlated features (use RL_MODE=model for AI)"
+        );
+    }
 
     let metrics = run_trial(candles, config, steps_per_year, &momentum_policy);
     print_metrics(&metrics, tf_str);
@@ -196,11 +226,11 @@ fn run_model(
     tracing::info!(model = %model_path, "loading trained model for backtest");
     let model = TableModel::from_checkpoint(&PathBuf::from(&model_path))?;
 
-    // Run model-based backtest with correlated features
+    // Run model-based backtest with correlated features (raw + derived)
     let features = extract_features(candles, CVD_WINDOW);
     let features = if !config.correlation_pairs.is_empty() && !correlated_candles.is_empty() {
         let cpf = CorrelatedPairFeatures::new(String::new(), config.correlation_pairs.clone());
-        cpf.merge_features(&features, correlated_candles, CVD_WINDOW)
+        cpf.merge_features_with_derived(&features, candles, correlated_candles, CVD_WINDOW)
     } else {
         features
     };
@@ -260,6 +290,7 @@ fn run_optimize(
     opt_config: &OptimizeConfig,
     tf_str: &str,
     path: &std::path::Path,
+    _correlated_candles: &HashMap<String, Vec<Candle>>,
 ) -> Result<()> {
     let tf = Timeframe::parse(tf_str).unwrap_or(Timeframe::M15);
     let steps_per_year = tf.steps_per_year();
@@ -350,7 +381,12 @@ fn run_optimize(
     Ok(())
 }
 
-fn run_multi_tf(candles: &[Candle], config: &RlConfig, path: &std::path::Path) -> Result<()> {
+fn run_multi_tf(
+    candles: &[Candle],
+    config: &RlConfig,
+    path: &std::path::Path,
+    _correlated_candles: &HashMap<String, Vec<Candle>>,
+) -> Result<()> {
     let mut all_results: HashMap<String, EpisodeMetrics> = HashMap::new();
 
     println!("\n=== Multi-Timeframe RL Backtest ===\n");

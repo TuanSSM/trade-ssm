@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use ssm_core::{AIAction, Candle, FeatureRow};
 
 use crate::config::{EnvConfig, RewardConfig, TrainingConfig};
-use crate::correlated_features::CorrelatedPairFeatures;
+use crate::correlated_features::{CorrelatedPairFeatures, CROSS_PAIR_FEATURE_COUNT};
 use crate::env::{TradingEnv, STATE_INFO_COUNT};
 use crate::episode_sampler::EpisodeSampler;
 use crate::features::{drop_ohlc_batch, extract_features, FEATURE_COUNT, FEATURE_COUNT_NO_OHLC};
@@ -113,8 +113,9 @@ impl RlTrainer {
             features
         };
 
-        // 1c. Merge correlated pair features
-        let (features, num_corr_pairs) = self.merge_correlated(features, correlated_candles);
+        // 1c. Merge correlated pair features (raw + derived)
+        let (features, num_corr_pairs) =
+            self.merge_correlated(features, candles, correlated_candles);
 
         // 2. Optionally fit normalizer and transform
         let normalizer = if self.config.normalize_features {
@@ -128,12 +129,13 @@ impl RlTrainer {
         };
 
         // 3. Determine input dimension
+        // Each correlated pair adds: 22 raw features + 5 derived cross-pair features
         let base_features = if self.config.training.drop_ohlc_from_features {
             FEATURE_COUNT_NO_OHLC
         } else {
             FEATURE_COUNT
         };
-        let corr_feature_count = FEATURE_COUNT * num_corr_pairs;
+        let corr_feature_count = (FEATURE_COUNT + CROSS_PAIR_FEATURE_COUNT) * num_corr_pairs;
         let input_dim = base_features
             + corr_feature_count
             + if self.config.env.add_state_info {
@@ -186,7 +188,8 @@ impl RlTrainer {
                 // Merge correlated features for this window (anti-repainting safe)
                 let window_end_time = window.last().map(|c| c.close_time).unwrap_or(i64::MAX);
                 let sliced_corr = slice_correlated_to_window(correlated_candles, window_end_time);
-                let (window_features, _) = self.merge_correlated(window_features, &sliced_corr);
+                let (window_features, _) =
+                    self.merge_correlated(window_features, window, &sliced_corr);
                 let window_features = match &normalizer {
                     Some(n) => n.transform_batch(&window_features),
                     None => window_features,
@@ -225,11 +228,12 @@ impl RlTrainer {
         }
     }
 
-    /// Merge correlated pair features into primary features if configured.
+    /// Merge correlated pair features (raw + derived) into primary features.
     /// Returns the (possibly enriched) features and the number of correlated pairs merged.
     fn merge_correlated(
         &self,
         features: Vec<FeatureRow>,
+        primary_candles: &[Candle],
         correlated_candles: &HashMap<String, Vec<Candle>>,
     ) -> (Vec<FeatureRow>, usize) {
         if self.config.correlation_pairs.is_empty() || correlated_candles.is_empty() {
@@ -242,7 +246,12 @@ impl RlTrainer {
             .filter(|p| correlated_candles.contains_key(*p))
             .count();
         let cpf = CorrelatedPairFeatures::new(String::new(), self.config.correlation_pairs.clone());
-        let merged = cpf.merge_features(&features, correlated_candles, self.config.cvd_window);
+        let merged = cpf.merge_features_with_derived(
+            &features,
+            primary_candles,
+            correlated_candles,
+            self.config.cvd_window,
+        );
         (merged, num_corr_pairs)
     }
 
