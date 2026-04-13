@@ -6,6 +6,9 @@ symbol = "BTCUSDT"
 interval = "15m"
 execution_mode = "paper"
 quantity = "0.001"
+# Correlated pairs for multi-asset context in RL training and signals.
+# correlation_pairs = ["ETHUSDT", "BTCUSDT"]
+correlation_pairs = []
 
 [risk]
 max_drawdown_pct = 10.0

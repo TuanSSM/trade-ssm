@@ -33,6 +33,7 @@ services:
       - INTERVAL=${INTERVAL:-15m}
       - DAYS=${DAYS:-30}
       - DATADIR=/app/user_data
+      - CORRELATION_PAIRS=${CORRELATION_PAIRS:-}
 
   # === Run backtest on downloaded data (freqtrade: backtesting) ===
   backtest:
@@ -65,6 +66,7 @@ services:
       - INTERVAL=${INTERVAL:-15m}
       - MODEL_DIR=/app/models
       - LEARNING_RATE=${LEARNING_RATE:-0.01}
+      - CORRELATION_PAIRS=${CORRELATION_PAIRS:-}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_USER=${NATS_USER:-ssm}
       - NATS_PASS=${NATS_PASS:-ssm_nats_secret}
@@ -88,7 +90,9 @@ services:
       - DATAFILE=${DATAFILE:-}
       - RL_MODE=${RL_MODE:-single}
       - RL_TIMEFRAME=${RL_TIMEFRAME:-15m}
+      - RL_CONFIG=${RL_CONFIG:-}
       - MODEL_PATH=${MODEL_PATH:-}
+      - CORR_DATAFILES=${CORR_DATAFILES:-}
 
   # === Data feed: WebSocket -> NATS ===
   data-feed:

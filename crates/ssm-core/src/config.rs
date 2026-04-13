@@ -114,6 +114,9 @@ pub struct TradingConfig {
     pub execution_mode: String,
     #[serde(default = "default_quantity")]
     pub quantity: String,
+    /// Correlated pairs for multi-asset context (e.g. `["ETHUSDT", "BTCUSDT"]`).
+    #[serde(default)]
+    pub correlation_pairs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +193,7 @@ impl Default for TradingConfig {
             interval: default_interval_str(),
             execution_mode: default_execution_mode_str(),
             quantity: default_quantity(),
+            correlation_pairs: vec![],
         }
     }
 }
