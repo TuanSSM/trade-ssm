@@ -21,6 +21,7 @@ members = [
     "services/rl-trainer",
     "services/api",
     "services/cli",
+    "crates/ssm-engine",
 ]
 
 [workspace.package]
@@ -85,4 +86,5 @@ ssm-ai = { path = "crates/ssm-ai" }
 ssm-nats = { path = "crates/ssm-nats" }
 ssm-orderflow = { path = "crates/ssm-orderflow" }
 ssm-store = { path = "crates/ssm-store" }
+ssm-engine = { path = "crates/ssm-engine" }
 rusqlite = { version = "0.32", features = ["bundled"] }

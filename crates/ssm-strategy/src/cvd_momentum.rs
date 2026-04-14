@@ -1,4 +1,5 @@
 use anyhow::Result;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use ssm_core::{AIAction, Candle, ExitReason, Order, Position, RoiEntry, Signal, StoplossType};
 use ssm_indicators::cvd::{analyze_cvd, CvdTrend};
@@ -57,12 +58,7 @@ impl Strategy for CvdMomentumStrategy {
         };
 
         // Simple confidence: ratio of CVD magnitude to window size
-        let magnitude = cvd
-            .total_cvd
-            .abs()
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
+        let magnitude = cvd.total_cvd.abs().to_f64().unwrap_or(0.0);
         let confidence = (magnitude / self.window as f64).min(1.0);
 
         if confidence < self.min_confidence {
