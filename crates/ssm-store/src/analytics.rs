@@ -1,3 +1,4 @@
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use ssm_core::TradeRecord;
 use std::collections::HashMap;
@@ -84,8 +85,7 @@ pub fn summarize(trades: &[TradeRecord]) -> PerformanceSummary {
     let worst = trades.iter().map(|t| t.profit).min().unwrap_or_default();
 
     let profit_factor = if gross_losses > Decimal::ZERO {
-        gross_wins.to_string().parse::<f64>().unwrap_or(0.0)
-            / gross_losses.to_string().parse::<f64>().unwrap_or(1.0)
+        gross_wins.to_f64().unwrap_or(0.0) / gross_losses.to_f64().unwrap_or(1.0)
     } else if gross_wins > Decimal::ZERO {
         f64::INFINITY
     } else {
