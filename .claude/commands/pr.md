@@ -17,4 +17,6 @@ Review PR $ARGUMENTS against trade-ssm standards.
 4. Verify `just ci` passes on the PR branch
 5. Post summary with approve/request-changes recommendation
 
-**Crate boundaries:** ssm-core←nothing | ssm-exchange←core | ssm-indicators←core | ssm-notify←core,indicators | ssm-execution←core | ssm-strategy←core,indicators | ssm-ai←core,indicators
+**Crate boundaries:** ssm-core←nothing | ssm-engine←core | ssm-exchange←core | ssm-indicators←core | ssm-notify←core,indicators | ssm-execution←core | ssm-strategy←core,indicators | ssm-ai←core,indicators
+
+6. ssm-engine hot-path violations: heap allocation, non-Copy types, branching gates

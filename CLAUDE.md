@@ -15,7 +15,8 @@ trade-ssm/
 │   ├── ssm-notify/        # Telegram notification dispatch
 │   ├── ssm-execution/     # Order engine: paper + live, position tracker
 │   ├── ssm-strategy/      # Strategy trait + built-in CVD momentum strategy
-│   └── ssm-ai/            # AI model trait, RL environment, feature pipeline
+│   ├── ssm-ai/            # AI model trait, RL environment, feature pipeline
+│   └── ssm-engine/        # Lock-free trading engine: per-core sharding, SeqLock, SPSC, branchless gates
 ├── services/
 │   ├── analyzer/          # Live polling service
 │   ├── download-data/     # Historical data fetcher (freqtrade download-data)
@@ -39,6 +40,7 @@ ssm-notify        ← ssm-core, ssm-indicators, reqwest
 ssm-execution     ← ssm-core, rust_decimal, chrono
 ssm-strategy      ← ssm-core, ssm-indicators
 ssm-ai            ← ssm-core, ssm-indicators, rust_decimal
+ssm-engine        ← ssm-core, rust_decimal
 analyzer          ← all crates
 download-data     ← ssm-exchange
 backtest          ← ssm-core, ssm-exchange, ssm-indicators
@@ -55,6 +57,70 @@ backtest          ← ssm-core, ssm-exchange, ssm-indicators
 | `ssm-execution` | Paper/live order engine | Position tracking, all order types |
 | `ssm-strategy` | Strategy trait + builtins | CVD momentum; implement `Strategy` for custom |
 | `ssm-ai` | ML/RL model interface | FreqAI-inspired: features, env, model trait |
+| `ssm-engine` | Lock-free per-core trading engine | No async, no alloc on hot path; Copy types only; SeqLock + SPSC |
+
+## Lock-free engine (`ssm-engine`)
+
+### Architecture
+
+```
+Controller (cold path)                    CoreSlot[N] (hot path)
+┌──────────────────────┐                 ┌──────────────────────┐
+│  Vec<CoreSlot>       │                 │  SymbolBuf           │
+│  SeqLock<EngineParams>──write──────────►  CoreEngine          │
+│                      │                 │    cached_params      │
+│  drain_events()  ◄─────────────────────┤  RingBuffer<TradeEvent>
+│  update_params()     │                 │                      │
+└──────────────────────┘                 │  on_tick(): ~1ns     │
+                                         │  on_signal(): gate+fill
+                                         └──────────────────────┘
+```
+
+- **Controller**: owns `Vec<CoreSlot>`, publishes params via SeqLock, drains events from SPSC rings
+- **CoreSlot**: `SymbolBuf` + `CoreEngine` + `RingBuffer<TradeEvent>` (one per symbol)
+- **CoreEngine**: zero-allocation state machine — reads SeqLock, evaluates gate, applies fill, pushes event
+- **SeqLock**: single-writer multi-reader, ~1ns cache-hit reads (99.6% hit rate)
+- **RingBuffer**: lock-free SPSC, cache-padded indices, power-of-2 capacity
+- **Gate**: branchless arithmetic composition (u32 multiply, no if/else)
+
+### Hot-path rules
+
+1. **No allocation** — no `String`, `Vec`, `HashMap`, `Box` on `on_tick`/`on_signal`/`apply_fill`
+2. **All types `Copy`** — `SymbolBuf`, `CorePosition`, `TradeEvent`, `EngineParams`
+3. **No async, no mutex** — pure synchronous state machine
+4. **SeqLock is single-writer** — only Controller writes; cores read (violation = data race)
+5. **SPSC is single-producer, single-consumer** — CoreEngine pushes, Controller pops (violation = UB)
+6. **Gate evaluation is branchless** — use `bool_gate()` × `decimal_lt()` multiplication, not if/else
+7. **Cache-line alignment** — `EngineParams` is `repr(C, align(64))`, SPSC indices are `CachePadded`
+8. **`CorePosition.to_position()` allocates** — cold path only (converts `SymbolBuf` → `String`)
+9. **Position-reducing orders bypass gate** — decreases risk, always allowed
+
+### Key types
+
+| Type | Size | Purpose |
+|------|------|---------|
+| `SymbolBuf` | 17 bytes | Fixed-size symbol, no heap (`[u8; 16]` + `u8` len) |
+| `CorePosition` | ~112 bytes | Per-core position state, mirrors `ssm_core::Position` |
+| `TradeEvent` | ~96 bytes | Fixed-size event for SPSC ring |
+| `EngineParams` | 64-byte aligned | Controller → core parameter block |
+| `PermissionFlags` | `u32` bitfield | `BUY_ALLOWED` (1<<0), `SELL_ALLOWED` (1<<1) |
+| `GateResult` | `u8` | `Open` (1) or `Blocked` (0) |
+
+### Benchmarks
+
+```bash
+cargo bench -p ssm-engine                       # all engine benchmarks
+cargo bench -p ssm-engine -- seqlock_cache_hit   # specific benchmark
+cargo bench -p ssm-engine -- core_               # all core engine benchmarks
+```
+
+Benchmark suite (`crates/ssm-engine/benches/engine_bench.rs`):
+- `gate_buy_open` / `gate_buy_blocked` — branchless gate evaluation
+- `seqlock_cache_hit` / `seqlock_cache_miss` / `seqlock_read` — parameter reads
+- `spsc_push_pop` — ring buffer cycle
+- `core_on_tick_no_position` / `core_on_tick_with_position` — tick hot path
+- `core_apply_fill` / `core_full_signal_cycle` — signal processing
+- `mark_to_market` — PnL update
 
 ## Order types supported
 
@@ -311,6 +377,10 @@ Total: `22 + 27×N [+ 8]` features (N = number of correlated pairs).
 - All I/O is async (tokio), indicators are sync pure functions
 - One test file per module, inline `#[cfg(test)]` blocks
 - Structured logging via `tracing` with field-level context
+- `ssm-engine` hot-path types must be `Copy` with `#[repr(C)]` — no heap pointers
+- `SymbolBuf` (not `String`) for symbols on the execution hot path
+- Gate checks use arithmetic composition (`u32` multiply), never branching `if/else`
+- SeqLock: single writer only; SPSC: single producer, single consumer only
 
 ## Definition of done
 
@@ -320,6 +390,10 @@ Total: `22 + 27×N [+ 8]` features (N = number of correlated pairs).
 - [ ] AI model trait implemented for new models
 - [ ] Docker builds successfully
 - [ ] Backtest runs on sample data without errors
+- [ ] Engine hot-path types are `Copy` (no `String`, `Vec`, `Box`)
+- [ ] No allocation in `on_tick`/`on_signal`/`apply_fill` paths
+- [ ] Benchmarks pass: `cargo bench -p ssm-engine`
+- [ ] SeqLock/RingBuffer safety contracts upheld (single-writer, SPSC)
 
 ## Adding a new strategy
 

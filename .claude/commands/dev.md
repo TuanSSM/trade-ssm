@@ -11,6 +11,7 @@ Activate development mode for trade-ssm.
 - `anyhow::Result` in binaries, domain errors in libraries
 - All I/O async (tokio), indicators sync pure functions
 - Never signal on forming candle (anti-repainting)
+- ssm-engine hot path: no allocation, no async, no mutex, all types Copy
 - One test file per module, inline `#[cfg(test)]`
 - `tracing` for logging with field-level context
 
@@ -20,7 +21,7 @@ Activate development mode for trade-ssm.
 
 **Dependency graph:**
 ```
-core ← exchange ← indicators ← notify
+core ← engine   ← exchange ← indicators ← notify
                  ← strategy   ← execution
                  ← ai
 ```

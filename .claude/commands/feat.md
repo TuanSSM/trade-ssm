@@ -19,5 +19,6 @@ Scaffold and implement a new feature. Usage: `/feat <description>`
 5. If indicator: add anti-repainting test
 6. If strategy: implement `Strategy` trait (see CLAUDE.md scaffold)
 7. If AI model: implement `AIModel` trait (see CLAUDE.md scaffold)
-8. Run `just ci` to validate
+8. If ssm-engine: all hot-path types must be Copy, no heap allocation, use branchless gate pattern
+9. Run `just ci` to validate
 9. Create branch `feat/<short-name>` if not on one

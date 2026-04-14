@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Remember: rust_decimal for prices/volumes, never f64. Anti-repainting: never signal on forming candle.'",
+            "command": "echo 'Remember: rust_decimal for prices/volumes, never f64. Anti-repainting: never signal on forming candle. Engine hot path: no alloc, no async, all types Copy.'",
             "timeout": 5
           }
         ]
