@@ -69,7 +69,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 opentelemetry = "0.27"
 opentelemetry-otlp = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.28"
 governor = "0.8"
 proptest = "1"
