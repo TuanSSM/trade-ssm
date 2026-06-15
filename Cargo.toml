@@ -87,4 +87,4 @@ ssm-nats = { path = "crates/ssm-nats" }
 ssm-orderflow = { path = "crates/ssm-orderflow" }
 ssm-store = { path = "crates/ssm-store" }
 ssm-engine = { path = "crates/ssm-engine" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
