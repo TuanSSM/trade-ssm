@@ -14,6 +14,21 @@ fee_penalty = true
 win_bonus = 0.0
 drawdown_penalty_rate = 0.0
 
+# ----- Advanced (FreqAI-style) reward shaping -----
+# Set reward_fn = "advanced" to enable the AdvancedRewardFn impl. All weights
+# below default to 0 (off), so switching to "advanced" with no further tuning
+# matches the default reward function's behavior.
+reward_fn = "default"
+sharpe_window = 64
+sharpe_weight = 0.0
+profit_factor_weight = 0.0
+inaction_penalty_rate = 0.0
+inaction_streak_threshold = 50
+hold_decay_base = 1.0
+drawdown_recovery_bonus = 0.0
+rr_bonus_weight = 0.0
+trade_frequency_cap = 0
+
 timeframes = ["3m", "15m", "1h", "4h"]
 
 # Correlated pair symbols whose candle data enriches the RL feature vector.

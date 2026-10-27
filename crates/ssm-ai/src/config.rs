@@ -45,7 +45,22 @@ impl Default for EnvConfig {
     }
 }
 
+fn default_sharpe_window() -> usize {
+    64
+}
+fn default_inaction_streak_threshold() -> usize {
+    50
+}
+fn default_hold_decay_base() -> f64 {
+    1.0
+}
+
 /// Reward shaping parameters — tunable hyperparameters for the RL environment.
+///
+/// The first block mirrors the original `DefaultRewardFn` knobs and remains
+/// backward-compatible. The second block adds FreqAI-style modern shaping
+/// used by `AdvancedRewardFn`. All new fields default off (0.0 / 1.0) so
+/// enabling `reward_fn = "advanced"` without tuning behaves like the default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewardConfig {
     /// Steps holding a position before penalty kicks in during Neutral actions.
@@ -70,6 +85,38 @@ pub struct RewardConfig {
     pub exposure_penalty_threshold: f64,
     /// Per-step bonus when both long and short are open (0.0 = off).
     pub hedge_bonus: f64,
+
+    // --- Advanced reward shaping (FreqAI-style, used by AdvancedRewardFn) ---
+    /// Rolling window of step returns for differential Sharpe (Moody & Saffell).
+    #[serde(default = "default_sharpe_window")]
+    pub sharpe_window: usize,
+    /// Weight on differential Sharpe reward term (0.0 = off).
+    #[serde(default)]
+    pub sharpe_weight: f64,
+    /// Weight on profit-factor shaping bonus (0.0 = off).
+    #[serde(default)]
+    pub profit_factor_weight: f64,
+    /// Penalty rate when Neutral streak exceeds `inaction_streak_threshold`.
+    #[serde(default)]
+    pub inaction_penalty_rate: f64,
+    /// Neutral streak length tolerated before the inaction penalty engages.
+    #[serde(default = "default_inaction_streak_threshold")]
+    pub inaction_streak_threshold: usize,
+    /// Exponential base for time-decay hold penalty (1.0 = linear/off).
+    #[serde(default = "default_hold_decay_base")]
+    pub hold_decay_base: f64,
+    /// Bonus when equity makes a new peak (drawdown recovery).
+    #[serde(default)]
+    pub drawdown_recovery_bonus: f64,
+    /// Weight on per-trade risk-reward bonus (pnl / |stop|).
+    #[serde(default)]
+    pub rr_bonus_weight: f64,
+    /// Soft cap for trades per episode; 0 disables the anti-churn penalty.
+    #[serde(default)]
+    pub trade_frequency_cap: u32,
+    /// Reward function selector: "default" (legacy) or "advanced" (FreqAI-style).
+    #[serde(default)]
+    pub reward_fn: Option<String>,
 }
 
 impl Default for RewardConfig {
@@ -86,6 +133,16 @@ impl Default for RewardConfig {
             exposure_penalty_rate: 0.0,
             exposure_penalty_threshold: 1.5,
             hedge_bonus: 0.0,
+            sharpe_window: default_sharpe_window(),
+            sharpe_weight: 0.0,
+            profit_factor_weight: 0.0,
+            inaction_penalty_rate: 0.0,
+            inaction_streak_threshold: default_inaction_streak_threshold(),
+            hold_decay_base: default_hold_decay_base(),
+            drawdown_recovery_bonus: 0.0,
+            rr_bonus_weight: 0.0,
+            trade_frequency_cap: 0,
+            reward_fn: None,
         }
     }
 }
@@ -535,9 +592,7 @@ mod tests {
             fee_penalty: true,
             win_bonus: 0.5,
             drawdown_penalty_rate: 0.03,
-            exposure_penalty_rate: 0.0,
-            exposure_penalty_threshold: 1.5,
-            hedge_bonus: 0.0,
+            ..RewardConfig::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: RewardConfig = serde_json::from_str(&json).unwrap();

@@ -234,8 +234,12 @@ fn run_model(
     } else {
         features
     };
-    let mut env =
-        TradingEnv::with_config(candles.to_vec(), config.env.clone(), config.reward.clone());
+    let mut env = TradingEnv::with_reward_fn(
+        candles.to_vec(),
+        config.env.clone(),
+        config.reward.clone(),
+        ssm_ai::reward_advanced::build_reward_fn(&config.reward),
+    );
     let mut obs = env.reset();
 
     while !obs.done {

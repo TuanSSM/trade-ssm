@@ -11,7 +11,8 @@ use crate::features::{drop_ohlc_batch, extract_features, FEATURE_COUNT, FEATURE_
 use crate::metrics::EpisodeMetrics;
 use crate::normalize::FeatureNormalizer;
 use crate::ppo::{Experience, PpoAgent, PpoConfig};
-use crate::reward::{DefaultRewardFn, RewardFn};
+use crate::reward::RewardFn;
+use crate::reward_advanced::build_reward_fn;
 
 /// Configuration for the RL training loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,26 +67,53 @@ pub struct TrainResult {
     pub total_episodes: usize,
 }
 
+/// Factory that constructs a fresh reward-fn instance per episode.
+///
+/// `AdvancedRewardFn` accumulates per-episode state (rolling returns,
+/// profit factor, drawdown peak, inaction streak), so the trainer and
+/// evaluator each build a new instance when they open a new `TradingEnv`.
+pub type RewardFnFactory = Box<dyn Fn() -> Box<dyn RewardFn> + Send + Sync>;
+
 /// Orchestrates RL training: feature extraction -> normalization -> env episodes -> PPO updates.
 ///
 /// Implements the FreqAI `IFreqaiModel.fit()` pattern as a single `train()` call.
 pub struct RlTrainer {
     config: TrainerConfig,
-    _reward_fn: Box<dyn RewardFn>,
+    reward_fn_factory: RewardFnFactory,
 }
 
 impl RlTrainer {
     pub fn new(config: TrainerConfig) -> Self {
+        let reward_cfg_snapshot = config.reward.clone();
+        let factory: RewardFnFactory = Box::new(move || build_reward_fn(&reward_cfg_snapshot));
         Self {
             config,
-            _reward_fn: Box::new(DefaultRewardFn),
+            reward_fn_factory: factory,
         }
     }
 
-    pub fn with_reward_fn(config: TrainerConfig, reward_fn: Box<dyn RewardFn>) -> Self {
+    /// Build a trainer with a custom reward-fn factory. Use when the caller
+    /// needs an impl beyond `default` / `advanced`.
+    pub fn with_reward_fn_factory(config: TrainerConfig, factory: RewardFnFactory) -> Self {
         Self {
             config,
-            _reward_fn: reward_fn,
+            reward_fn_factory: factory,
+        }
+    }
+
+    /// Backward-compat helper: wrap a single boxed reward fn in a factory that
+    /// returns it on the first call and `DefaultRewardFn` thereafter.
+    /// Prefer `with_reward_fn_factory` for stateful reward fns.
+    pub fn with_reward_fn(config: TrainerConfig, reward_fn: Box<dyn RewardFn>) -> Self {
+        use std::sync::Mutex;
+        let first = Mutex::new(Some(reward_fn));
+        let factory: RewardFnFactory = Box::new(move || match first.lock().unwrap().take() {
+            Some(r) => r,
+            None => Box::new(crate::reward::DefaultRewardFn),
+        });
+        Self {
+            config,
+            reward_fn_factory: factory,
         }
     }
 
@@ -256,10 +284,11 @@ impl RlTrainer {
     }
 
     fn run_episode(&self, agent: &mut PpoAgent, candles: &[Candle], features: &[FeatureRow]) {
-        let mut env = TradingEnv::with_config(
+        let mut env = TradingEnv::with_reward_fn(
             candles.to_vec(),
             self.config.env.clone(),
             self.config.reward.clone(),
+            (self.reward_fn_factory)(),
         );
         let mut obs = env.reset();
 
@@ -299,10 +328,11 @@ impl RlTrainer {
         candles: &[Candle],
         features: &[FeatureRow],
     ) -> EpisodeMetrics {
-        let mut env = TradingEnv::with_config(
+        let mut env = TradingEnv::with_reward_fn(
             candles.to_vec(),
             self.config.env.clone(),
             self.config.reward.clone(),
+            (self.reward_fn_factory)(),
         );
         let mut obs = env.reset();
 

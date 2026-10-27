@@ -17,5 +17,6 @@ pub mod outlier;
 pub mod ppo;
 pub mod replay_buffer;
 pub mod reward;
+pub mod reward_advanced;
 pub mod trainer;
 pub mod vectorized_env;
